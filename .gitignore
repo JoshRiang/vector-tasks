@@ -1,0 +1,9 @@
+*.apk
+*.zip
+build/
+.dart_tool/
+.packages
+android/local.properties
+android/.gradle/
+.idea/
+*.iml
