@@ -99,6 +99,9 @@ class NextActionWidget : AppWidgetProvider() {
             connectTimeout = 8000
             readTimeout = 8000
             setRequestProperty("X-User-Id", userId)
+            // Shared secret, required once the API is publicly reachable.
+            val apiKey = context.getString(R.string.vector_api_key)
+            if (apiKey.isNotEmpty()) setRequestProperty("X-Api-Key", apiKey)
             setRequestProperty("Accept", "application/json")
         }
         try {

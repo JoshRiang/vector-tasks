@@ -7,4 +7,5 @@
     <string name="widget_description">Next action from VECTOR</string>
     <string name="vector_api_base">http://100.89.180.23:8790</string>
     <string name="vector_user_id">josh</string>
+    <string name="vector_api_key"></string>
 </resources>
