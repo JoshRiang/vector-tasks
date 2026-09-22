@@ -1,94 +1,104 @@
 # Vector Tasks
 
-State one end goal. Get back a plan whose first step you can start in under 30 minutes.
+**Type one end goal. Get back a plan you can actually start.**
 
+Part of the **VECTOR Suite** — three apps, one private database.
 
+---
 
-| Component | What it does |
-|---|---|
-| `backend/` | One API. Turns a goal into a plan; serves all three apps. |
-| `vector-tasks` | The core app. One goal in, one next action out. |
-| `vector-calendar` | Today's plan: what's startable, what's done, focus time. |
-| `vector-finance` | Balance, burn rate, runway. |
-| `supabase/schema.sql` | The private database schema. |
+## The problem this solves
 
-All three apps share one database. A task created in `vector-tasks` appears in
-`vector-calendar`; spending logged in `vector-finance` informs the day. That
-integration is the reason the database is shared and not three separate ones.
+> "I'm not productive, why? Because I have too many to-do lists, and I don't
+> know where to start, so it leads to nothing started."
 
-## Why there is a backend at all
+The problem is **not** a missing to-do list. A list of twenty undifferentiated
+items is what *causes* the paralysis. So this app inverts the normal model:
 
-Two reasons, both non-negotiable:
+**You never write a task.** You type an outcome — *"get a quant internship in
+Germany"*, *"finish my thesis chapter 3"* — and the assistant returns a
+dependency-ordered plan whose **first step is always something you can start in
+under 30 minutes**.
 
-1. **The model key can never ship in an APK.** Anything embedded in an APK is
-   extractable with `unzip` + `strings`. So no app ever calls a model
-   directly — the backend does.
-2. **The plan must be trustworthy.** Goal decomposition is the entire product
-   value, so it lives in one place that can be tested, versioned and repaired,
-   instead of being duplicated in three apps.
+## The one design decision that matters
 
-## The design decision that matters
+The app shows **exactly one task at a time**.
 
-The single most important behaviour is in `startable_tasks`:
+Blocking is enforced in the database, not the UI:
 
 ```sql
 where t.status in ('todo','doing')
   and (t.blocked_by is null or b.status = 'done')
 ```
 
-A task whose blocker is unfinished is **never** returned to the app. The user
-sees exactly one thing to do. This is not a UI filter — it is enforced at the
-data layer, because a UI that merely hides work still leaves the user with the
-whole list in their head.
+A task whose blocker is unfinished is *never* returned to the app. A UI that
+merely hides the rest still leaves the whole list in your head — so the filter
+lives in the data layer, where it cannot be bypassed.
 
-## Running it
+Finish the current task → the next one unlocks. That's the whole loop.
 
-```bash
-# Backend (no dependencies beyond the stdlib for the local store)
-cd backend
-python3 api.py            # serves 0.0.0.0:8790
+## Home-screen widget
 
-# Or as a service
-systemctl --user start vector-suite-api
+A native Android widget (`NextActionWidget`) shows the single next action
+without opening the app. It fetches the API directly on a background thread, so
+it stays current rather than showing a stale snapshot.
+
+## Screens
+
+- **Goal input** — one text field. Nothing else.
+- **The plan** — one task, its rationale, and its time estimate. A progress bar
+  shows how far along you are without showing everything left to do.
+- **Completion** — when the plan is finished it says so, and offers a new goal.
+
+## Architecture
+
+```
+Flutter app  ──HTTP──▶  VECTOR Suite API  ──▶  private database
+  (this repo)             (decompose + store)
 ```
 
+The app never calls a language model directly. The model key lives server-side
+only: anything embedded in an APK is extractable with `unzip` and `strings`.
+
+## Build
+
 ```bash
-# Apps
-cd vector-tasks
 flutter pub get
 flutter test
 flutter build apk --release --target-platform android-arm64 --split-per-abi
 ```
 
-The apps default to the server's Tailscale address. Override at build time:
+Point it at your own server:
 
 ```bash
-flutter build apk --dart-define=API_BASE=http://<host>:8790
+flutter build apk --dart-define=API_BASE=https://your-host
 ```
 
-## Storage
+CI builds the APK on every push and injects `API_BASE` from the repository
+variable of the same name, so the endpoint can change without touching code.
 
-`backend/store.py` implements a PostgREST-compatible `db_request()` over local
-SQLite, so the system works with **zero** cloud setup. Point `SUPABASE_URL`
-and `SUPABASE_SERVICE_KEY` at a Supabase project and the same calls hit
-Postgres instead — no handler changes. `/health` reports which is active.
+## Widget endpoint
 
-## Tests
+The widget reads `vector_api_base` from
+`android/app/src/main/res/values/strings.xml`. The CI build rewrites that value
+from the same `API_BASE` variable, so the widget and the app can never point at
+different servers.
 
-```bash
-python3 run_all_tests.py
-```
+## The VECTOR Suite
 
-Covers store semantics, API routing, the decomposition parser, the timezone
-boundary, and structural checks on all three Flutter apps. No network needed.
+| App | Question it answers |
+|---|---|
+| **Vector Tasks** (this) | What is the one thing to start right now? |
+| [Vector Calendar](https://github.com/JoshRiang/vector-calendar) | How is today going? |
+| [Vector Finance](https://github.com/JoshRiang/vector-finance) | How much runway is left? |
+
+All three share one private database, so a task created here appears on the
+calendar and informs the day's cost.
 
 ## Privacy
 
-Every table is row-level-security gated on `auth.uid()`. The anon key alone
-reads nothing. The backend runs on the owner's own server; the database is
-private to one user.
+Every table is row-level-security gated on the authenticated user. The backend
+runs on the owner's own server.
 
-## Not a licensed advisor
+## Licence
 
-`vector-finance` computes and reports. It does not recommend trades or
-investments.
+MIT

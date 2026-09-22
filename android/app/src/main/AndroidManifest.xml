@@ -24,6 +24,21 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+    
+        <!-- Home-screen widget. Without this declaration the provider class is
+             never discovered by the launcher and the widget silently never
+             appears in the picker. -->
+        <receiver
+            android:name=".NextActionWidget"
+            android:label="@string/widget_label"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_next_action_info" />
+        </receiver>
     </application>
     <uses-permission android:name="android.permission.INTERNET"/>
 </manifest>

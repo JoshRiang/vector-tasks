@@ -8,16 +8,41 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Injected at build time so the endpoint can change (Tailscale -> public
+      # URL -> Supabase) without touching Dart or Kotlin. Set under
+      # Settings > Secrets and variables > Actions > Variables as API_BASE.
+      API_BASE: ${{ vars.API_BASE || 'http://100.89.180.23:8790' }}
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
+
       - run: flutter --version
       - run: flutter pub get
       - run: flutter test
-      - run: flutter build apk --release --target-platform android-arm64 --split-per-abi
+
+      # The native widget reads its endpoint from a string resource. This MUST
+      # run before the build -- patching it afterwards would have no effect,
+      # because the value is already compiled into the APK by then.
+      - name: Point widget at the same API base
+        run: |
+          echo "Using API_BASE=$API_BASE"
+          f=android/app/src/main/res/values/strings.xml
+          sed -i "s|<string name=\"vector_api_base\">.*</string>|<string name=\"vector_api_base\">$API_BASE</string>|" "$f"
+          grep -n vector_api_base "$f"
+
+      - name: Build release APK
+        run: >
+          flutter build apk --release
+          --target-platform android-arm64
+          --split-per-abi
+          --dart-define=API_BASE=$API_BASE
+
       - uses: actions/upload-artifact@v4
         with:
           name: vector-tasks-apk-arm64
