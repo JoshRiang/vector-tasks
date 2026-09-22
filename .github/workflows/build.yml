@@ -33,11 +33,13 @@ jobs:
       # effect, because the values are already compiled into the APK.
       - name: Point widget at the same API base and key
         run: |
-          echo "DIAG base_len=${#API_BASE} key_len=${#API_KEY}"
+          # Report LENGTHS only -- never the values. An earlier version masked
+          # the key with a regex that also hid the case where it was empty,
+          # which made a broken build look fine.
+          echo "API_BASE set: ${#API_BASE} chars | API_KEY set: ${#API_KEY} chars"
           f=android/app/src/main/res/values/strings.xml
           sed -i "s|<string name=\"vector_api_base\">.*</string>|<string name=\"vector_api_base\">$API_BASE</string>|" "$f"
           sed -i "s|<string name=\"vector_api_key\">.*</string>|<string name=\"vector_api_key\">$API_KEY</string>|" "$f"
-          grep -n 'vector_api' "$f" | sed 's|\(vector_api_key\">\).\{4\}.*|\1****|'
 
       - name: Build release APK
         run: >
