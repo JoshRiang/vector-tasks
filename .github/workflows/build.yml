@@ -33,7 +33,7 @@ jobs:
       # effect, because the values are already compiled into the APK.
       - name: Point widget at the same API base and key
         run: |
-          echo "Using API_BASE=$API_BASE"
+          echo "DIAG base_len=${#API_BASE} key_len=${#API_KEY}"
           f=android/app/src/main/res/values/strings.xml
           sed -i "s|<string name=\"vector_api_base\">.*</string>|<string name=\"vector_api_base\">$API_BASE</string>|" "$f"
           sed -i "s|<string name=\"vector_api_key\">.*</string>|<string name=\"vector_api_key\">$API_KEY</string>|" "$f"
