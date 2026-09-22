@@ -69,20 +69,17 @@ class _GoalPageState extends State<GoalPage> {
   @override
   void initState() {
     super.initState();
-    _api = Api(userId: 'local');
+    _api = Api(userId: Api.defaultUserId);
     Future.microtask(_loadUserId);
   }
 
   Future<void> _loadUserId() async {
     final prefs = await SharedPreferences.getInstance();
-    var id = prefs.getString('vector.user_id');
-    if (id == null || id.isEmpty) {
-      // Stable per-install id. The backend treats it as the row owner; a real
-      // deployment swaps this for the Supabase auth uid.
-      id = 'u-${DateTime.now().microsecondsSinceEpoch}';
-      await prefs.setString('vector.user_id', id);
-    }
-    setState(() => _api = Api(userId: id!));
+    // Stable owner id so the server-side morning brief reads the same rows.
+    // A random per-install id would split the data and the brief would always
+    // report "no goals".
+    final id = prefs.getString('vector.user_id') ?? Api.defaultUserId;
+    setState(() => _api = Api(userId: id));
   }
 
   Future<void> _submit() async {

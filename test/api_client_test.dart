@@ -89,4 +89,17 @@ void main() {
       expect(Api.defaultBaseUrl.startsWith('http://'), isTrue);
     });
   });
+
+  group('stable owner id', () {
+    test('defaults to a constant so the server-side brief sees the same rows',
+        () {
+      expect(Api.defaultUserId, 'josh');
+    });
+
+    test('is not randomised per install', () {
+      // A random id would split data between the app and the cron brief.
+      expect(Api.defaultUserId.contains(r'$'), isFalse);
+      expect(Api.defaultUserId.length < 40, isTrue);
+    });
+  });
 }
