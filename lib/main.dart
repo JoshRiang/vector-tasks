@@ -8,6 +8,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
 
+/// Pseudo list for dated tasks that belong to no goal.
+///
+/// A task created by an instruction has no goal_id, so without this grouping it
+/// would be invisible in the app. Declared at file scope because both the home
+/// page and the task detail page need it, and the detail page must never send
+/// this value to the server as a real goal_id.
+const String kNoListId = '__none__';
+
 void main() {
   // The app renders white on the user's device and reports nothing, so every
   // failure class is both SURFACED on screen and REPORTED to the server. The
@@ -108,13 +116,6 @@ class _HomePageState extends State<HomePage> {
 
   String _selectedListId = 'all';
   bool _hideCompleted = false;
-
-  /// Pseudo list for dated tasks that belong to no goal.
-  ///
-  /// A task created by an instruction has no goal_id, so without this it would
-  /// be invisible in the app. The id is not a real goal, so saving a task under
-  /// it must send a null goal_id rather than this value.
-  static const String _noListId = '__none__';
 
   /// Local date as YYYY-MM-DD, built by hand because the date-range endpoint
   /// takes a plain date and this avoids any locale/UTC surprise.
@@ -241,7 +242,7 @@ class _HomePageState extends State<HomePage> {
             } else {
               // No list. Grouping these under a real list keeps one code path
               // for rendering; they are NOT written back to the server.
-              m['_goal_id'] = _noListId;
+              m['_goal_id'] = kNoListId;
               m['_goal_title'] = 'No list';
             }
             dated.add(m);
@@ -251,8 +252,8 @@ class _HomePageState extends State<HomePage> {
         // A calendar failure must not hide the goal tasks that did load.
       }
       if (dated.isNotEmpty) {
-        byGoal[_noListId] = dated;
-        titles[_noListId] = 'No list';
+        byGoal[kNoListId] = dated;
+        titles[kNoListId] = 'No list';
       }
       Api.beacon('reload', 'calendar ok extra=${dated.length}');
 
@@ -558,7 +559,7 @@ class _HomePageState extends State<HomePage> {
     // Never return the pseudo list: it is a display-only grouping, not a real
     // goal, and sending it would store a goal_id that does not exist.
     if (_selectedListId != 'all' &&
-        _selectedListId != _noListId &&
+        _selectedListId != kNoListId &&
         _goalTitles.containsKey(_selectedListId)) {
       return _selectedListId;
     }
@@ -1479,7 +1480,7 @@ class _TaskDetailPageState extends State<TaskDetailPage> {
     final gid = (widget.task['_goal_id'] ?? widget.goalId).toString();
     // A task with no list arrives grouped under the pseudo list; keep the
     // picker on "no list" rather than pretending it belongs to one.
-    _listId = gid == _noListId ? '' : gid;
+    _listId = gid == kNoListId ? '' : gid;
   }
 
   @override
@@ -1666,7 +1667,7 @@ class _TaskDetailPageState extends State<TaskDetailPage> {
         minutes: _minutes,
         allDay: _due == null ? null : _allDay,
         notes: notes.isEmpty ? null : notes,
-        goalId: (_listId.isEmpty || _listId == _noListId) ? null : _listId,
+        goalId: (_listId.isEmpty || _listId == kNoListId) ? null : _listId,
         priority: _priority,
       );
       if (!mounted) return;
