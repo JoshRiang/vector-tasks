@@ -909,6 +909,16 @@ class _HomePageState extends State<HomePage> {
       }
       chips.add(_listChip(gid, (g['title'] ?? 'Untitled').toString(), open));
     }
+    // Dated tasks with no goal get their own chip, otherwise the only way to
+    // reach something created by an instruction is the catch-all "All" view.
+    final noList = _tasksByGoal[kNoListId];
+    if (noList != null && noList.isNotEmpty) {
+      var open = 0;
+      for (final t in noList) {
+        if ((t['status'] ?? '').toString() != 'done') open++;
+      }
+      chips.add(_listChip(kNoListId, 'No list', open));
+    }
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 18, 0, 0),
       child: Column(
