@@ -109,7 +109,8 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _goals = goals;
         _startable = startable;
-        _doneToday = ((today['done_today'] as List?) ?? []).length;
+        final rawDone = today['done_today'];
+        _doneToday = rawDone is List ? rawDone.length : 0;
         _loading = false;
         _error = null;
       });
@@ -151,8 +152,14 @@ class _HomePageState extends State<HomePage> {
 
   /// Tick a task from the home list, then refresh so an unlocked task appears.
   Future<void> _complete(String taskId) async {
+    if (taskId.isEmpty) {
+      if (!mounted) return;
+      setState(() => _error = 'This task has no id, so it cannot be saved.');
+      return;
+    }
     final before = List<Map<String, dynamic>>.from(_startable);
-    setState(() => _startable.removeWhere((t) => t['id'] == taskId));
+    setState(() =>
+        _startable.removeWhere((t) => (t['id'] ?? '').toString() == taskId));
     try {
       await _api.completeTask(taskId);
       await _reload();
@@ -303,7 +310,10 @@ class _HomePageState extends State<HomePage> {
     }
 
     final task = _startable.first;
-    final id = task['id'].toString();
+    // `id` is the tasks-table primary key so it is always present, but a
+    // missing key must degrade to '' (which surfaces a save error) rather than
+    // throw on null.toString() and kill the home screen.
+    final id = (task['id'] ?? '').toString();
     final extra = _startable.length - 1;
 
     return Padding(
@@ -418,9 +428,13 @@ class _HomePageState extends State<HomePage> {
         itemCount: _goals.length,
         itemBuilder: (_, i) {
           final g = _goals[i];
-          final pct = (g['pct_done'] as num?)?.toInt() ?? 0;
-          final total = (g['total_tasks'] as num?)?.toInt() ?? 0;
-          final done = (g['done_tasks'] as num?)?.toInt() ?? 0;
+          // `is` checks, not `as` casts: a wrong-typed value degrades to 0
+          // instead of throwing inside the build and blanking the screen.
+          final pct = g['pct_done'] is num ? (g['pct_done'] as num).toInt() : 0;
+          final total =
+              g['total_tasks'] is num ? (g['total_tasks'] as num).toInt() : 0;
+          final done =
+              g['done_tasks'] is num ? (g['done_tasks'] as num).toInt() : 0;
           return Padding(
             padding: const EdgeInsets.only(bottom: 10),
             child: GestureDetector(
@@ -583,11 +597,27 @@ class _GoalDetailPageState extends State<GoalDetailPage> {
     super.dispose();
   }
 
-  String get _goalId => widget.goal['id'].toString();
+  // GET /goals (goal_progress view) keys the identifier as `goal_id`, not
+  // `id`. Fall back to `id` for goal maps that came from POST /goals (a raw
+  // goals-table row). A missing key degrades to '' and the loader below shows
+  // an error instead of requesting /goals/null/tasks or throwing.
+  String get _goalId =>
+      (widget.goal['goal_id'] ?? widget.goal['id'] ?? '').toString();
 
   Future<void> _load() async {
+    final goalId = _goalId;
+    if (goalId.isEmpty) {
+      // No identifier arrived with the goal map: say so instead of requesting
+      // /goals//tasks and showing a confusing server error.
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'This goal has no id, so its tasks cannot be loaded.';
+      });
+      return;
+    }
     try {
-      final data = await widget.api.goalTasks(_goalId);
+      final data = await widget.api.goalTasks(goalId);
       final parsed = GoalTasks.fromJson(data);
       if (!mounted) return;
       setState(() {
@@ -602,16 +632,31 @@ class _GoalDetailPageState extends State<GoalDetailPage> {
         _loading = false;
         _error = e.message;
       });
+    } catch (e) {
+      // GoalTasks.fromJson must never throw, but if it ever does the page
+      // shows a message and a retry instead of a blank screen.
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Something went wrong: $e';
+      });
     }
   }
 
   Future<void> _toggle(Map<String, dynamic> task) async {
-    final id = task['id'].toString();
+    final id = (task['id'] ?? '').toString();
+    if (id.isEmpty) {
+      if (!mounted) return;
+      setState(() => _error = 'This task has no id, so it cannot be saved.');
+      return;
+    }
     final wasDone = task['status'] == 'done';
     // Optimistic flip so the tap feels instant.
     setState(() {
       for (final t in _tasks) {
-        if (t['id'] == id) t['status'] = wasDone ? 'todo' : 'done';
+        if ((t['id'] ?? '').toString() == id && id.isNotEmpty) {
+          t['status'] = wasDone ? 'todo' : 'done';
+        }
       }
     });
     try {
