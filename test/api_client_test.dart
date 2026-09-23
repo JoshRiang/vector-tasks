@@ -102,4 +102,123 @@ void main() {
       expect(Api.defaultUserId.length < 40, isTrue);
     });
   });
+
+  group('GoalTasks parsing', () {
+    test('reads counts and percentage from the server', () {
+      final g = GoalTasks.fromJson({
+        'goal_id': 'g1',
+        'total': 4,
+        'done': 1,
+        'pct_done': 25,
+        'tasks': [
+          {'id': 't1', 'title': 'a', 'status': 'done', 'startable': false},
+          {'id': 't2', 'title': 'b', 'status': 'todo', 'startable': true},
+        ],
+      });
+      expect(g.goalId, 'g1');
+      expect(g.total, 4);
+      expect(g.done, 1);
+      expect(g.pctDone, 25);
+      expect(g.tasks.length, 2);
+    });
+
+    test('derives the percentage when the server omits it', () {
+      final g = GoalTasks.fromJson({
+        'total': 4,
+        'tasks': [
+          {'id': 't1', 'status': 'done'},
+          {'id': 't2', 'status': 'todo'},
+          {'id': 't3', 'status': 'todo'},
+          {'id': 't4', 'status': 'todo'},
+        ],
+      });
+      // 1 of 4 -> 25%. A missing field must not render as an empty bar.
+      expect(g.pctDone, 25);
+      expect(g.done, 1);
+    });
+
+    test('an empty goal is 0%, not a division by zero', () {
+      final g = GoalTasks.fromJson({'tasks': []});
+      expect(g.pctDone, 0);
+      expect(g.total, 0);
+      expect(g.startable, isEmpty);
+    });
+
+    test('only startable rows are offered as actionable', () {
+      final g = GoalTasks.fromJson({
+        'tasks': [
+          {'id': 't1', 'status': 'todo', 'startable': true},
+          {'id': 't2', 'status': 'todo', 'startable': false},
+          {'id': 't3', 'status': 'done', 'startable': false},
+        ],
+      });
+      expect(g.startable.length, 1);
+      expect(g.startable.first['id'], 't1');
+    });
+  });
+
+  group('TaskState subtitles', () {
+    test('a startable task says how long it takes', () {
+      final t = TaskState.fromJson(
+          {'id': 't1', 'title': 'x', 'minutes': 20, 'startable': true});
+      expect(t.subtitle, '20 min  \u00b7  ready now');
+    });
+
+    test('a blocked task names what it waits on', () {
+      final t = TaskState.fromJson({
+        'id': 't2',
+        'title': 'y',
+        'minutes': 30,
+        'startable': false,
+        'blocked_by_title': 'First step',
+      });
+      expect(t.subtitle, contains('First step'));
+      expect(t.subtitle, contains('30 min'));
+    });
+
+    test('a blocked task with no name does not print "null"', () {
+      final t = TaskState.fromJson(
+          {'id': 't3', 'title': 'z', 'minutes': 15, 'startable': false});
+      expect(t.subtitle, '15 min  \u00b7  waiting');
+      expect(t.subtitle.contains('null'), isFalse);
+    });
+
+    test('done wins over startable', () {
+      final t = TaskState.fromJson({
+        'id': 't4',
+        'title': 'w',
+        'minutes': 10,
+        'status': 'done',
+        'startable': false,
+      });
+      expect(t.isDone, isTrue);
+      expect(t.subtitle, 'Done');
+      expect(t.isSkipped, isFalse);
+    });
+
+    test('skipped is reported as skipped', () {
+      final t = TaskState.fromJson({'id': 't5', 'status': 'skipped'});
+      expect(t.isSkipped, isTrue);
+      expect(t.subtitle, 'Skipped');
+    });
+
+    test('a missing minutes field falls back instead of crashing', () {
+      final t = TaskState.fromJson({'id': 't6', 'status': 'todo'});
+      expect(t.minutes, 30);
+      expect(t.title, '');
+    });
+  });
+
+  group('new client methods exist', () {
+    test('goal-scoped, task-write and goal-delete calls are present', () {
+      final api = Api(baseUrl: 'http://x', userId: 'u', apiKey: 'k');
+      // Referencing the tear-offs proves the signatures compile.
+      expect(api.goalTasks, isNotNull);
+      expect(api.addTask, isNotNull);
+      expect(api.completeTask, isNotNull);
+      expect(api.reopenTask, isNotNull);
+      expect(api.deleteGoal, isNotNull);
+      expect(api.renameGoal, isNotNull);
+    });
+  });
 }

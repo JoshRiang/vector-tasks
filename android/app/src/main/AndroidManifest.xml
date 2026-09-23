@@ -24,7 +24,6 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-    
         <!-- Home-screen widget. Without this declaration the provider class is
              never discovered by the launcher and the widget silently never
              appears in the picker. -->
