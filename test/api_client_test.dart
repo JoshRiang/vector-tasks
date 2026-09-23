@@ -5,6 +5,12 @@
 /// app does with a given server response) rather than about widget layout.
 library;
 
+import 'dart:async' show TimeoutException;
+import 'dart:io' show HandshakeException;
+
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart' show MockClient;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vector_tasks/api_client.dart';
 
@@ -219,6 +225,74 @@ void main() {
       expect(api.reopenTask, isNotNull);
       expect(api.deleteGoal, isNotNull);
       expect(api.renameGoal, isNotNull);
+    });
+  });
+
+  group('network failures become messages, never a blank screen', () {
+    Api apiWith(http.Client c) =>
+        Api(baseUrl: 'http://x', userId: 'u', apiKey: 'k', client: c);
+
+    test('a connection failure surfaces as an offline ApiException', () async {
+      // http wraps a refused connection in ClientException, NOT SocketException.
+      final api = apiWith(MockClient((_) async {
+        throw http.ClientException('Connection refused');
+      }));
+      await expectLater(
+        api.goals(),
+        throwsA(isA<ApiException>().having((e) => e.offline, 'offline', true)),
+      );
+    });
+
+    test('a timeout surfaces as an offline ApiException', () async {
+      // .timeout() throws TimeoutException, which is not a SocketException.
+      final api = apiWith(MockClient((_) async {
+        throw TimeoutException('too slow');
+      }));
+      await expectLater(
+        api.today(),
+        throwsA(isA<ApiException>().having((e) => e.offline, 'offline', true)),
+      );
+    });
+
+    test('a TLS failure surfaces as an offline ApiException', () async {
+      final api = apiWith(MockClient((_) async {
+        throw const HandshakeException('bad cert');
+      }));
+      await expectLater(
+        api.today(),
+        throwsA(isA<ApiException>()),
+      );
+    });
+
+    test('a non-JSON body surfaces as an ApiException, not a crash', () async {
+      // A captive portal returns an HTML page with status 200.
+      final api = apiWith(MockClient((_) async =>
+          http.Response('<html>hotel wifi</html>', 200)));
+      await expectLater(api.goals(), throwsA(isA<ApiException>()));
+    });
+
+    test('a 401 keeps its status so the UI can distinguish auth from offline',
+        () async {
+      final api = apiWith(MockClient((_) async =>
+          http.Response('{"error":"unauthorized"}', 401)));
+      await expectLater(
+        api.goals(),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'status', 401)),
+      );
+    });
+
+    test('a 500 keeps its status', () async {
+      final api = apiWith(MockClient((_) async =>
+          http.Response('{"error":"boom"}', 500)));
+      await expectLater(
+        api.goals(),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'status', 500)),
+      );
+    });
+
+    test('a good response still parses', () async {
+      final api = apiWith(MockClient((_) async => http.Response('[]', 200)));
+      expect(await api.goals(), isEmpty);
     });
   });
 }

@@ -87,9 +87,15 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _boot() async {
-    final prefs = await SharedPreferences.getInstance();
-    // Stable owner id so the server-side morning brief reads the same rows.
-    final id = prefs.getString('vector.user_id') ?? Api.defaultUserId;
+    // Read the stored owner id, but never let a prefs failure strand the app on
+    // a blank screen: fall back to the default id and keep going.
+    String id = Api.defaultUserId;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      id = prefs.getString('vector.user_id') ?? Api.defaultUserId;
+    } catch (_) {
+      // Prefs are an optimisation here, not a requirement.
+    }
     _api = Api(userId: id);
     await _reload();
   }
@@ -112,6 +118,14 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _loading = false;
         _error = e.message;
+      });
+    } catch (e) {
+      // A non-ApiException here used to escape and leave _loading true forever.
+      // Whatever went wrong, the user gets a message and a retry button.
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Something went wrong: $e';
       });
     }
   }
