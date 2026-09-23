@@ -1416,14 +1416,25 @@ class _HomePageState extends State<HomePage> {
         ),
       );
 
+  /// One line of the command history.
+  ///
+  /// GET /commands returns chat rows keyed {id, role, content, created_at} —
+  /// NOT instruction/reply. Reading the wrong keys made every history entry
+  /// fall through to the placeholder, so real past instructions were invisible.
+  /// The other key names are still tried for older servers.
   String _historyLine(Map<String, dynamic> h) {
-    final instruction =
-        (h['instruction'] ?? h['command'] ?? h['text'] ?? '').toString();
-    final reply = (h['reply'] ?? h['result'] ?? '').toString();
-    if (instruction.isEmpty && reply.isEmpty) return 'Change applied.';
-    if (instruction.isEmpty) return reply;
-    if (reply.isEmpty) return instruction;
-    return '$instruction — $reply';
+    final role = (h['role'] ?? '').toString();
+    final content = (h['content'] ??
+            h['instruction'] ??
+            h['reply'] ??
+            h['text'] ??
+            h['result'] ??
+            '')
+        .toString();
+    if (content.isEmpty) return 'Change applied.';
+    if (role == 'user') return 'You: $content';
+    if (role == 'assistant') return content;
+    return content;
   }
 }
 
