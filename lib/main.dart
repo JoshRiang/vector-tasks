@@ -86,7 +86,11 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final _goalController = TextEditingController();
-  late final Api _api;
+  // NOT `late final`: _boot() re-creates the client once it has read the stored
+  // owner id from prefs, so the field is assigned twice. `late final` throws
+  // LateInitializationError on the second assignment, asynchronously, which
+  // left _loading true forever - a blank white screen with no message.
+  late Api _api;
 
   bool _busy = false;
   bool _loading = true;
