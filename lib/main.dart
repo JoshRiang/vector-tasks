@@ -18,18 +18,34 @@
 /// write rolls the row back and says so.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
 
 void main() {
-  // In release builds a widget whose build() throws is replaced by a
-  // blank ErrorWidget that prints nothing, so the screen just goes white
-  // and the device reports no reason. Surface it instead.
-  ErrorWidget.builder =
-      (FlutterErrorDetails d) => _CrashReport(d);
-  runApp(const VectorTasksApp());
+  // The app renders white on the user's device and reports nothing, so every
+  // failure class is both SURFACED on screen and REPORTED to the server. The
+  // beacons are the only way to learn where startup stops when the screen
+  // itself is the thing that is broken.
+  runZonedGuarded(() {
+    ErrorWidget.builder = (FlutterErrorDetails d) {
+      Api.beacon('errorwidget', '${d.exception}\n${d.stack}');
+      return _CrashReport(d);
+    };
+    FlutterError.onError = (FlutterErrorDetails d) {
+      Api.beacon('fluttererror', '${d.exception}\n${d.stack}');
+      FlutterError.presentError(d);
+    };
+    Api.beacon('main', 'entered main()');
+    runApp(const VectorTasksApp());
+  }, (Object error, StackTrace stack) {
+    // Uncaught async errors never reach ErrorWidget.builder, so they are
+    // exactly the class that produces a blank screen with no message.
+    Api.beacon('uncaught', '$error\n$stack');
+  });
 }
 
 class AppColors {
@@ -94,6 +110,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _boot() async {
+    Api.beacon('boot', 'start');
     // Read the stored owner id, but never let a prefs failure strand the app on
     // a blank screen: fall back to the default id and keep going.
     String id = Api.defaultUserId;
@@ -103,6 +120,7 @@ class _HomePageState extends State<HomePage> {
     } catch (_) {
       // Prefs are an optimisation here, not a requirement.
     }
+    Api.beacon('boot', 'prefs ok, id=$id');
     _api = Api(userId: id);
     await _reload();
   }
@@ -111,13 +129,18 @@ class _HomePageState extends State<HomePage> {
     // Name the stage so a failure reports WHICH request broke, rather
     // than a generic message that cannot be acted on.
     var stage = 'goals';
+    Api.beacon('reload', 'start');
     try {
       final goals = await _api.goals();
+      Api.beacon('reload', 'goals ok n=${goals.length}');
       stage = 'startable';
       final startable = await _api.startable();
+      Api.beacon('reload', 'startable ok n=${startable.length}');
       stage = 'today';
       final today = await _api.today();
+      Api.beacon('reload', 'today ok');
       if (!mounted) return;
+      Api.beacon('reload', 'about to setState with data');
       setState(() {
         _goals = goals;
         _startable = startable;
@@ -126,13 +149,16 @@ class _HomePageState extends State<HomePage> {
         _loading = false;
         _error = null;
       });
+      Api.beacon('reload', 'setState done, data on screen');
     } on ApiException catch (e) {
+      Api.beacon('reload', 'ApiException at $stage: ${e.message}');
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = e.message;
       });
-    } catch (e) {
+    } catch (e, st) {
+      Api.beacon('reload', 'unexpected at $stage: $e\n$st');
       // A non-ApiException here used to escape and leave _loading true
       // forever. Naming the stage makes the report actionable.
       if (!mounted) return;
@@ -196,6 +222,9 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    // Reached only if the widget tree is actually being built - the difference
+    // between "startup died" and "startup worked but drew nothing".
+    Api.beacon('build', 'loading=$_loading err=$_error');
     return CupertinoPageScaffold(
       child: Container(
         decoration: const BoxDecoration(
