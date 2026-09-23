@@ -23,7 +23,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
 
-void main() => runApp(const VectorTasksApp());
+void main() {
+  // In release builds a widget whose build() throws is replaced by a
+  // blank ErrorWidget that prints nothing, so the screen just goes white
+  // and the device reports no reason. Surface it instead.
+  ErrorWidget.builder =
+      (FlutterErrorDetails d) => _CrashReport(d);
+  runApp(const VectorTasksApp());
+}
 
 class AppColors {
   static const bgBase = Color(0xFFF5F5F7);
@@ -101,9 +108,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _reload() async {
+    // Name the stage so a failure reports WHICH request broke, rather
+    // than a generic message that cannot be acted on.
+    var stage = 'goals';
     try {
       final goals = await _api.goals();
+      stage = 'startable';
       final startable = await _api.startable();
+      stage = 'today';
       final today = await _api.today();
       if (!mounted) return;
       setState(() {
@@ -121,12 +133,12 @@ class _HomePageState extends State<HomePage> {
         _error = e.message;
       });
     } catch (e) {
-      // A non-ApiException here used to escape and leave _loading true forever.
-      // Whatever went wrong, the user gets a message and a retry button.
+      // A non-ApiException here used to escape and leave _loading true
+      // forever. Naming the stage makes the report actionable.
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = 'Something went wrong: $e';
+        _error = 'Failed at $stage: $e';
       });
     }
   }
@@ -929,4 +941,35 @@ class _GoalDetailPageState extends State<GoalDetailPage> {
           ]),
         ],
       );
+}
+
+
+/// Shown instead of Flutter's default ErrorWidget when a widget's build throws.
+///
+/// In release builds that default is a blank grey box that prints nothing, so a
+/// crash looks exactly like a hung request. This renders the message and stack
+/// on screen, which is the only way a failure on a real device is reportable.
+class _CrashReport extends StatelessWidget {
+  const _CrashReport(this.details);
+
+  final FlutterErrorDetails details;
+
+  @override
+  Widget build(BuildContext context) {
+    final msg = details.exception.toString();
+    final stack = details.stack?.toString() ?? '';
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Container(
+        color: const Color(0xFF111827),
+        padding: const EdgeInsets.all(14),
+        child: SingleChildScrollView(
+          child: Text(
+            'VECTOR crashed\n\n$msg\n\n$stack',
+            style: const TextStyle(color: Color(0xFFF9FAFB), fontSize: 11),
+          ),
+        ),
+      ),
+    );
+  }
 }
