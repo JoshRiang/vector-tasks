@@ -1,21 +1,4 @@
-/// VECTOR Tasks — many goals, each with a checklist Hermes manages.
-///
-/// DESIGN PREMISE
-/// --------------
-/// A flat list of everything produces paralysis, so this app never shows the
-/// whole backlog at once. It shows:
-///   1. the ONE thing to start right now (the hero card), and
-///   2. the goals, each opened into its own checklist on demand.
-///
-/// The app PLANS NOTHING. Ordering, dependencies and "what is startable" are
-/// decided server-side, so the same plan drives this screen, the home-screen
-/// widget and Hermes's own view of the work. Adding a task here writes to that
-/// same shared list.
-///
-/// Ticking a task is optimistic: the row flips immediately, then the server is
-/// told, then the list is reloaded so a newly unlocked task appears. A network
-/// blip must not make the app feel broken, but it must also not lie — a failed
-/// write rolls the row back and says so.
+// ignore_for_file: use_build_context_synchronously
 library;
 
 import 'dart:async';
@@ -62,6 +45,20 @@ class AppColors {
   static const textTertiary = Color(0xFF9CA3AF);
 }
 
+/// Frosted card shared by every surface in the app.
+Widget glassBox({required Widget child}) => Container(
+      decoration: BoxDecoration(
+        color: AppColors.glass,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0x14000000)),
+        boxShadow: const [
+          BoxShadow(
+              color: Color(0x0F000000), blurRadius: 20, offset: Offset(0, 6)),
+        ],
+      ),
+      child: child,
+    );
+
 class VectorTasksApp extends StatelessWidget {
   const VectorTasksApp({super.key});
 
@@ -77,6 +74,8 @@ class VectorTasksApp extends StatelessWidget {
       );
 }
 
+/// Google Tasks-like home: lists from goals, an "All tasks" view, rows grouped
+/// by date, a bottom quick-add field, and a Hermes command bar.
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -85,20 +84,49 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final _goalController = TextEditingController();
+  final _commandController = TextEditingController();
+  final _quickAddController = TextEditingController();
+  final _quickNotesController = TextEditingController();
+  final _newListController = TextEditingController();
+
   // NOT `late final`: _boot() re-creates the client once it has read the stored
   // owner id from prefs, so the field is assigned twice. `late final` throws
   // LateInitializationError on the second assignment, asynchronously, which
-  // left _loading true forever - a blank white screen with no message.
+  // used to leave _loading true forever - a blank white screen with no message.
   late Api _api;
 
-  bool _busy = false;
   bool _loading = true;
+  bool _sendingCommand = false;
+  bool _adding = false;
+  bool _creatingList = false;
   String? _error;
 
   List<Map<String, dynamic>> _goals = [];
-  List<Map<String, dynamic>> _startable = [];
+  Map<String, List<Map<String, dynamic>>> _tasksByGoal = {};
+  Map<String, String> _goalTitles = {};
   int _doneToday = 0;
+
+  String _selectedListId = 'all';
+  bool _hideCompleted = false;
+
+  /// Pseudo list for dated tasks that belong to no goal.
+  ///
+  /// A task created by an instruction has no goal_id, so without this it would
+  /// be invisible in the app. The id is not a real goal, so saving a task under
+  /// it must send a null goal_id rather than this value.
+  static const String _noListId = '__none__';
+
+  /// Local date as YYYY-MM-DD, built by hand because the date-range endpoint
+  /// takes a plain date and this avoids any locale/UTC surprise.
+  String _dayStr(DateTime d) =>
+      '${d.year.toString().padLeft(4, '0')}-${_pad2(d.month)}-${_pad2(d.day)}';
+
+  List<Map<String, String>> _exchanges = [];
+  List<Map<String, dynamic>> _history = [];
+
+  DateTime? _quickDue;
+  int _quickPriority = 3;
+  bool _showQuickMore = false;
 
   @override
   void initState() {
@@ -109,14 +137,22 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _goalController.dispose();
+    _commandController.dispose();
+    _quickAddController.dispose();
+    _quickNotesController.dispose();
+    _newListController.dispose();
     super.dispose();
   }
 
+  // GET /goals keys the identifier as `goal_id`, not `id`. Fall back to `id`
+  // for goal maps that came from POST /goals (a raw goals-table row).
+  String _goalId(Map<String, dynamic> g) =>
+      (g['goal_id'] ?? g['id'] ?? '').toString();
+
+  String _goalTitleOf(String goalId) => _goalTitles[goalId] ?? 'List';
+
   Future<void> _boot() async {
     Api.beacon('boot', 'start');
-    // Read the stored owner id, but never let a prefs failure strand the app on
-    // a blank screen: fall back to the default id and keep going.
     String id = Api.defaultUserId;
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -130,26 +166,115 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _reload() async {
-    // Name the stage so a failure reports WHICH request broke, rather
-    // than a generic message that cannot be acted on.
     var stage = 'goals';
     Api.beacon('reload', 'start');
     try {
       final goals = await _api.goals();
       Api.beacon('reload', 'goals ok n=${goals.length}');
-      stage = 'startable';
-      final startable = await _api.startable();
-      Api.beacon('reload', 'startable ok n=${startable.length}');
+      stage = 'tasks';
+      final Map<String, List<Map<String, dynamic>>> byGoal = {};
+      final Map<String, String> titles = {};
+      for (final g in goals) {
+        final gid = _goalId(g);
+        if (gid.isEmpty) continue;
+        final title = (g['title'] ?? 'Untitled list').toString();
+        titles[gid] = title;
+        try {
+          final data = await _api.goalTasks(gid);
+          final parsed = GoalTasks.fromJson(data);
+          final stamped = <Map<String, dynamic>>[];
+          for (final t in parsed.tasks) {
+            final copy = Map<String, dynamic>.from(t);
+            copy['_goal_id'] = gid;
+            copy['_goal_title'] = title;
+            stamped.add(copy);
+          }
+          byGoal[gid] = stamped;
+        } catch (_) {
+          // One failing list must not blank the rest; show what loaded.
+          byGoal[gid] = [];
+        }
+      }
+      Api.beacon('reload', 'tasks ok lists=${byGoal.length}');
       stage = 'today';
-      final today = await _api.today();
-      Api.beacon('reload', 'today ok');
+      int doneToday = 0;
+      try {
+        final today = await _api.today();
+        final rawDone = today['done_today'];
+        doneToday = rawDone is List ? rawDone.length : 0;
+      } catch (_) {
+        doneToday = 0;
+      }
+
+      // Dated tasks, including ones with NO list.
+      //
+      // The loop above only reaches tasks through their goal, so a task created
+      // by an instruction ("add a dentist appointment tomorrow at 2pm") belongs
+      // to no goal and would never appear in the app at all. Fetching the
+      // calendar window as well is what makes those visible, and gives the
+      // Overdue/Today/Tomorrow grouping its real dates.
+      stage = 'calendar';
+      final seen = <String>{};
+      for (final list in byGoal.values) {
+        for (final t in list) {
+          seen.add((t['id'] ?? '').toString());
+        }
+      }
+      final dated = <Map<String, dynamic>>[];
+      try {
+        final now = DateTime.now();
+        final start = now.subtract(const Duration(days: 60));
+        final end = now.add(const Duration(days: 120));
+        final res = await _api.calendarRange(start: _dayStr(start), end: _dayStr(end));
+        final raw = res['items'];
+        if (raw is List) {
+          for (final item in raw) {
+            if (item is! Map) continue;
+            final m = Map<String, dynamic>.from(item);
+            final id = (m['id'] ?? '').toString();
+            if (id.isEmpty || seen.contains(id)) continue;
+            seen.add(id);
+            final gid = (m['goal_id'] ?? '').toString();
+            if (gid.isNotEmpty && titles.containsKey(gid)) {
+              m['_goal_id'] = gid;
+              m['_goal_title'] = titles[gid];
+            } else {
+              // No list. Grouping these under a real list keeps one code path
+              // for rendering; they are NOT written back to the server.
+              m['_goal_id'] = _noListId;
+              m['_goal_title'] = 'No list';
+            }
+            dated.add(m);
+          }
+        }
+      } catch (_) {
+        // A calendar failure must not hide the goal tasks that did load.
+      }
+      if (dated.isNotEmpty) {
+        byGoal[_noListId] = dated;
+        titles[_noListId] = 'No list';
+      }
+      Api.beacon('reload', 'calendar ok extra=${dated.length}');
+
+      stage = 'history';
+      List<Map<String, dynamic>> history = [];
+      try {
+        history = await _api.commandHistory();
+      } catch (_) {
+        history = [];
+      }
+      Api.beacon('reload', 'history ok n=${history.length}');
       if (!mounted) return;
       Api.beacon('reload', 'about to setState with data');
       setState(() {
         _goals = goals;
-        _startable = startable;
-        final rawDone = today['done_today'];
-        _doneToday = rawDone is List ? rawDone.length : 0;
+        _tasksByGoal = byGoal;
+        _goalTitles = titles;
+        _doneToday = doneToday;
+        _history = history.length > 5 ? history.sublist(0, 5) : history;
+        if (_selectedListId != 'all' && !titles.containsKey(_selectedListId)) {
+          _selectedListId = 'all';
+        }
         _loading = false;
         _error = null;
       });
@@ -163,8 +288,6 @@ class _HomePageState extends State<HomePage> {
       });
     } catch (e, st) {
       Api.beacon('reload', 'unexpected at $stage: $e\n$st');
-      // A non-ApiException here used to escape and leave _loading true
-      // forever. Naming the stage makes the report actionable.
       if (!mounted) return;
       setState(() {
         _loading = false;
@@ -173,61 +296,420 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _submit() async {
-    final goal = _goalController.text.trim();
-    if (goal.isEmpty || _busy) return;
+  // ------------------------------------------------------------------
+  // Grouping + formatting helpers (pure, no `as` casts anywhere).
+  // ------------------------------------------------------------------
+
+  DateTime? _parseWhen(Map<String, dynamic> t) {
+    final raw = (t['scheduled_at'] ?? '').toString();
+    if (raw.isEmpty) return null;
+    try {
+      return DateTime.parse(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isAllDay(Map<String, dynamic> t) {
+    final v = t['all_day'];
+    if (v is num) return v.toInt() == 1;
+    if (v is bool) return v;
+    return false;
+  }
+
+  int _minutesOf(Map<String, dynamic> t) {
+    final v = t['minutes'];
+    return v is num ? v.toInt() : 30;
+  }
+
+  int _priorityOf(Map<String, dynamic> t) {
+    final v = t['priority'];
+    if (v is num) {
+      final p = v.toInt();
+      if (p >= 1 && p <= 4) return p;
+    }
+    return 3;
+  }
+
+  String _bucketFor(Map<String, dynamic> t, DateTime now) {
+    final w = _parseWhen(t);
+    if (w == null) return 'No date';
+    final d = DateTime(w.year, w.month, w.day);
+    final td = DateTime(now.year, now.month, now.day);
+    final diff = d.difference(td).inDays;
+    if (diff < 0) return 'Overdue';
+    if (diff == 0) return 'Today';
+    if (diff == 1) return 'Tomorrow';
+    return 'Later';
+  }
+
+  String _monthName(int m) {
+    const names = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    if (m < 1 || m > 12) return '';
+    return names[m - 1];
+  }
+
+  String _fmtTime(DateTime d) {
+    var h = d.hour;
+    final m = d.minute;
+    final suffix = h >= 12 ? 'PM' : 'AM';
+    var hh = h % 12;
+    if (hh == 0) hh = 12;
+    final mm = m < 10 ? '0$m' : '$m';
+    return '$hh:$mm $suffix';
+  }
+
+  String _fmtDue(Map<String, dynamic> t, DateTime now) {
+    final w = _parseWhen(t);
+    if (w == null) return '';
+    final allDay = _isAllDay(t);
+    final d = DateTime(w.year, w.month, w.day);
+    final td = DateTime(now.year, now.month, now.day);
+    final diff = d.difference(td).inDays;
+    String day;
+    if (diff == 0) {
+      day = 'Today';
+    } else if (diff == 1) {
+      day = 'Tomorrow';
+    } else if (diff == -1) {
+      day = 'Yesterday';
+    } else {
+      day = '${w.day} ${_monthName(w.month)}';
+      if (w.year != now.year) day = '$day ${w.year}';
+    }
+    if (allDay) return day;
+    // Tasks without a meaningful time still carry midnight; showing
+    // "12:00 AM" would be noise, so only show the clock past 00:00.
+    if (w.hour == 0 && w.minute == 0) return day;
+    return '$day ${_fmtTime(w)}';
+  }
+
+  String _subtitle(Map<String, dynamic> t, DateTime now) {
+    final parts = <String>[];
+    final due = _fmtDue(t, now);
+    if (due.isNotEmpty) parts.add(due);
+    parts.add('${_minutesOf(t)} min');
+    if (_selectedListId == 'all') {
+      final g = (t['_goal_title'] ?? '').toString();
+      if (g.isNotEmpty) parts.add(g);
+    } else {
+      final why = (t['why'] ?? t['blocked_by_title'] ?? '').toString();
+      if (why.isNotEmpty) parts.add(why);
+    }
+    return parts.join('  ·  ');
+  }
+
+  List<Map<String, dynamic>> _visibleTasks() {
+    final out = <Map<String, dynamic>>[];
+    if (_selectedListId == 'all') {
+      for (final entry in _tasksByGoal.entries) {
+        out.addAll(entry.value);
+      }
+    } else {
+      final list = _tasksByGoal[_selectedListId];
+      if (list != null) out.addAll(list);
+    }
+    if (_hideCompleted) {
+      out.removeWhere((t) => (t['status'] ?? '').toString() == 'done');
+    }
+    return out;
+  }
+
+  Map<String, List<Map<String, dynamic>>> _grouped(
+      List<Map<String, dynamic>> tasks, DateTime now) {
+    const order = ['Overdue', 'Today', 'Tomorrow', 'Later', 'No date'];
+    final groups = <String, List<Map<String, dynamic>>>{
+      for (final k in order) k: <Map<String, dynamic>>[],
+    };
+    for (final t in tasks) {
+      groups[_bucketFor(t, now)]!.add(t);
+    }
+    for (final k in order) {
+      groups[k]!.sort((a, b) {
+        final da = _parseWhen(a);
+        final db = _parseWhen(b);
+        if (da == null && db == null) {
+          final pa = _priorityOf(a);
+          final pb = _priorityOf(b);
+          if (pa != pb) return pa.compareTo(pb);
+          return (a['title'] ?? '')
+              .toString()
+              .compareTo((b['title'] ?? '').toString());
+        }
+        if (da == null) return 1;
+        if (db == null) return -1;
+        final c = da.compareTo(db);
+        if (c != 0) return c;
+        return _priorityOf(a).compareTo(_priorityOf(b));
+      });
+    }
+    return groups;
+  }
+
+  // ------------------------------------------------------------------
+  // Mutations.
+  // ------------------------------------------------------------------
+
+  Future<void> _toggleTask(Map<String, dynamic> task) async {
+    final id = (task['id'] ?? '').toString();
+    if (id.isEmpty) {
+      if (!mounted) return;
+      setState(() => _error = 'This task has no id, so it cannot be saved.');
+      return;
+    }
+    final wasDone = (task['status'] ?? '').toString() == 'done';
+    final gid = (task['_goal_id'] ?? _selectedListId).toString();
     setState(() {
-      _busy = true;
+      final list = _tasksByGoal[gid];
+      if (list != null) {
+        for (final t in list) {
+          if ((t['id'] ?? '').toString() == id) {
+            t['status'] = wasDone ? 'todo' : 'done';
+          }
+        }
+      }
+    });
+    try {
+      if (wasDone) {
+        await _api.reopenTask(id);
+      } else {
+        await _api.completeTask(id);
+      }
+      await _reload();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Could not save: ${e.message}');
+      await _reload();
+    }
+  }
+
+  String _pad2(int n) => n < 10 ? '0$n' : '$n';
+
+  String _toScheduledAt(DateTime d) =>
+      '${d.year}-${_pad2(d.month)}-${_pad2(d.day)}T${_pad2(d.hour)}:${_pad2(d.minute)}:00';
+
+  Future<void> _pickQuickDue() async {
+    DateTime temp = _quickDue ?? DateTime.now();
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => Container(
+        height: 340,
+        color: CupertinoColors.white,
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            CupertinoButton(
+              child: const Text('Clear'),
+              onPressed: () {
+                setState(() => _quickDue = null);
+                Navigator.pop(ctx);
+              },
+            ),
+            CupertinoButton(
+              child: const Text('Done',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              onPressed: () {
+                setState(() => _quickDue = temp);
+                Navigator.pop(ctx);
+              },
+            ),
+          ]),
+          Expanded(
+            child: CupertinoDatePicker(
+              mode: CupertinoDatePickerMode.dateAndTime,
+              initialDateTime: temp,
+              onDateTimeChanged: (d) => temp = d,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickQuickGoal() async {
+    if (_goals.isEmpty) return;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoActionSheet(
+        title: const Text('Add to list'),
+        actions: [
+          for (final g in _goals)
+            CupertinoActionSheetAction(
+              onPressed: () {
+                Navigator.pop(ctx);
+                if (!mounted) return;
+                final gid = _goalId(g);
+                setState(() => _selectedListId = gid);
+              },
+              child: Text((g['title'] ?? 'Untitled').toString()),
+            ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+      ),
+    );
+  }
+
+  String _quickTargetGoalId() {
+    // Never return the pseudo list: it is a display-only grouping, not a real
+    // goal, and sending it would store a goal_id that does not exist.
+    if (_selectedListId != 'all' &&
+        _selectedListId != _noListId &&
+        _goalTitles.containsKey(_selectedListId)) {
+      return _selectedListId;
+    }
+    if (_goals.isNotEmpty) return _goalId(_goals.first);
+    return '';
+  }
+
+  Future<void> _quickAdd() async {
+    final title = _quickAddController.text.trim();
+    if (title.isEmpty || _adding) return;
+    final goalId = _quickTargetGoalId();
+    if (goalId.isEmpty) {
+      if (!mounted) return;
+      setState(() => _error = 'Create a list first, then add tasks to it.');
+      return;
+    }
+    setState(() {
+      _adding = true;
       _error = null;
     });
     try {
-      await _api.createGoal(goal);
-      _goalController.clear();
+      final notes = _quickNotesController.text.trim();
+      if (_quickDue != null) {
+        await _api.upsertTask(
+          title: title,
+          scheduledAt: _toScheduledAt(_quickDue!),
+          minutes: 30,
+          notes: notes.isEmpty ? null : notes,
+          goalId: goalId,
+          priority: _quickPriority,
+        );
+      } else {
+        await _api.addTask(
+          goalId,
+          title,
+          why: notes.isEmpty ? null : notes,
+          priority: _quickPriority,
+        );
+      }
+      _quickAddController.clear();
+      _quickNotesController.clear();
+      if (!mounted) return;
+      setState(() {
+        _quickDue = null;
+        _quickPriority = 3;
+        _showQuickMore = false;
+      });
       await _reload();
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _error = e.message);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      if (mounted) setState(() => _adding = false);
     }
   }
 
-  /// Tick a task from the home list, then refresh so an unlocked task appears.
-  Future<void> _complete(String taskId) async {
-    if (taskId.isEmpty) {
-      if (!mounted) return;
-      setState(() => _error = 'This task has no id, so it cannot be saved.');
-      return;
-    }
-    final before = List<Map<String, dynamic>>.from(_startable);
-    setState(() =>
-        _startable.removeWhere((t) => (t['id'] ?? '').toString() == taskId));
+  Future<void> _createList() async {
+    final title = _newListController.text.trim();
+    if (title.isEmpty || _creatingList) return;
+    setState(() {
+      _creatingList = true;
+      _error = null;
+    });
     try {
-      await _api.completeTask(taskId);
+      await _api.createGoal(title);
+      _newListController.clear();
       await _reload();
     } on ApiException catch (e) {
       if (!mounted) return;
-      // Roll back: showing the task as done when the server disagrees would
-      // hide real work.
-      setState(() {
-        _startable = before;
-        _error = 'Could not save: ${e.message}';
-      });
+      setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _creatingList = false);
     }
   }
 
-  void _openGoal(Map<String, dynamic> goal) {
+  Future<void> _sendCommand() async {
+    final text = _commandController.text.trim();
+    if (text.isEmpty || _sendingCommand) return;
+    setState(() {
+      _sendingCommand = true;
+      _error = null;
+    });
+    try {
+      final res = await _api.command(text);
+      final reply = (res['reply'] ?? '').toString();
+      final problems = <String>[];
+      final applied = res['applied'];
+      if (applied is List) {
+        for (final e in applied) {
+          if (e is Map) {
+            final m = Map<String, dynamic>.from(e);
+            final err = (m['error'] ?? '').toString();
+            if (err.isNotEmpty) {
+              final what =
+                  (m['title'] ?? m['action'] ?? 'change').toString();
+              problems.add('$what: $err');
+            }
+          }
+        }
+      }
+      _commandController.clear();
+      if (!mounted) return;
+      setState(() {
+        final shown = reply.isEmpty ? 'Done.' : reply;
+        if (problems.isNotEmpty) {
+          _exchanges.insert(0, {
+            'q': text,
+            'a': '$shown\nPartial failure: ${problems.join('; ')}',
+          });
+        } else {
+          _exchanges.insert(0, {'q': text, 'a': shown});
+        }
+        if (_exchanges.length > 5) {
+          _exchanges = _exchanges.sublist(0, 5);
+        }
+      });
+      await _reload();
+      if (!mounted) return;
+      if (problems.isNotEmpty) {
+        setState(() =>
+            _error = 'Hermes applied some changes, but: ${problems.join('; ')}');
+      }
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _sendingCommand = false);
+    }
+  }
+
+  void _openDetail(Map<String, dynamic> task) {
+    final gid = (task['_goal_id'] ?? '').toString();
     Navigator.of(context)
         .push(CupertinoPageRoute(
-          builder: (_) => GoalDetailPage(api: _api, goal: goal),
+          builder: (_) => TaskDetailPage(
+            api: _api,
+            task: task,
+            goalId: gid,
+            goalTitle: (task['_goal_title'] ?? _goalTitleOf(gid)).toString(),
+            goals: _goals,
+          ),
         ))
         .then((_) => _reload());
   }
 
+  // ------------------------------------------------------------------
+  // Build.
+  // ------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
-    // Reached only if the widget tree is actually being built - the difference
-    // between "startup died" and "startup worked but drew nothing".
     Api.beacon('build', 'loading=$_loading err=$_error');
     return CupertinoPageScaffold(
       child: Container(
@@ -241,8 +723,9 @@ class _HomePageState extends State<HomePage> {
         child: SafeArea(
           child: _loading
               ? const Center(child: CupertinoActivityIndicator())
-              // Pull-to-refresh is CupertinoSliverRefreshControl: RefreshIndicator
-              // is a Material widget and this app never imports Material.
+              // Pull-to-refresh is CupertinoSliverRefreshControl:
+              // RefreshIndicator is a Material widget and this app never
+              // imports Material.
               : CustomScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   slivers: [
@@ -250,10 +733,14 @@ class _HomePageState extends State<HomePage> {
                     SliverToBoxAdapter(child: _header()),
                     if (_error != null)
                       SliverToBoxAdapter(child: _errorBanner(_error!)),
-                    SliverToBoxAdapter(child: _nextActionCard()),
-                    SliverToBoxAdapter(child: _goalsHeading()),
-                    _goalsList(),
-                    SliverToBoxAdapter(child: _newGoalCard()),
+                    SliverToBoxAdapter(child: _commandCard()),
+                    SliverToBoxAdapter(child: _listSelector()),
+                    SliverToBoxAdapter(child: _filterRow()),
+                    ..._sectionSlivers(),
+                    SliverToBoxAdapter(child: _quickAddCard()),
+                    SliverToBoxAdapter(child: _newListCard()),
+                    if (_history.isNotEmpty)
+                      SliverToBoxAdapter(child: _historyCard()),
                     const SliverToBoxAdapter(child: SizedBox(height: 40)),
                   ],
                 ),
@@ -278,7 +765,7 @@ class _HomePageState extends State<HomePage> {
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 const Expanded(
-                  child: Text('Your goals',
+                  child: Text('Tasks',
                       style: TextStyle(
                           fontSize: 32,
                           height: 1.1,
@@ -319,542 +806,290 @@ class _HomePageState extends State<HomePage> {
         ),
       );
 
-  /// The one thing to do now. This is the whole point of the product, so it
-  /// gets the most prominent surface on the screen.
-  Widget _nextActionCard() {
-    if (_startable.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
-        child: _glass(
+  /// Hermes command bar: type an instruction, read the reply, see what changed.
+  Widget _commandCard() => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 18, 24, 0),
+        child: glassBox(
           child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(children: [
-              const Icon(CupertinoIcons.checkmark_circle_fill,
-                  size: 26, color: AppColors.success),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text('All clear',
-                        style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: AppColors.textPrimary)),
-                    SizedBox(height: 3),
-                    Text('Nothing is startable right now. Add a goal below.',
-                        style: TextStyle(
-                            fontSize: 13, color: AppColors.textSecondary)),
-                  ],
-                ),
-              ),
-            ]),
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('ASK HERMES',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textTertiary,
+                        letterSpacing: 1.2)),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: CupertinoTextField(
+                      controller: _commandController,
+                      placeholder:
+                          'e.g. move groceries to tomorrow morning',
+                      placeholderStyle:
+                          const TextStyle(color: AppColors.textTertiary),
+                      padding: const EdgeInsets.all(12),
+                      style: const TextStyle(
+                          fontSize: 14, color: AppColors.textPrimary),
+                      decoration: BoxDecoration(
+                        color: const Color(0x0F000000),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      onSubmitted: (_) => _sendCommand(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: _sendingCommand ? null : _sendCommand,
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: _sendingCommand
+                            ? AppColors.textTertiary
+                            : AppColors.accent,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: _sendingCommand
+                          ? const CupertinoActivityIndicator(
+                              color: CupertinoColors.white)
+                          : const Icon(CupertinoIcons.arrow_up,
+                              size: 18, color: CupertinoColors.white),
+                    ),
+                  ),
+                ]),
+                for (final ex in _exchanges) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: const Color(0x0A6366F1),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(ex['q'] ?? '',
+                            style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary)),
+                        const SizedBox(height: 4),
+                        Text(ex['a'] ?? '',
+                            style: const TextStyle(
+                                fontSize: 12,
+                                height: 1.4,
+                                color: AppColors.textSecondary)),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       );
+
+  /// Lists = goals, plus an "All tasks" view. A horizontal chip row works as
+  /// the segmented control for an arbitrary number of lists.
+  Widget _listSelector() {
+    final chips = <Widget>[];
+    chips.add(_listChip('all', 'All tasks', _visibleCountAll()));
+    for (final g in _goals) {
+      final gid = _goalId(g);
+      if (gid.isEmpty) continue;
+      final list = _tasksByGoal[gid];
+      var open = 0;
+      if (list != null) {
+        for (final t in list) {
+          if ((t['status'] ?? '').toString() != 'done') open++;
+        }
+      }
+      chips.add(_listChip(gid, (g['title'] ?? 'Untitled').toString(), open));
     }
-
-    final task = _startable.first;
-    // `id` is the tasks-table primary key so it is always present, but a
-    // missing key must degrade to '' (which surfaces a save error) rather than
-    // throw on null.toString() and kill the home screen.
-    final id = (task['id'] ?? '').toString();
-    final extra = _startable.length - 1;
-
     return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: const LinearGradient(
-              colors: [AppColors.accent, AppColors.accentSoft]),
-          borderRadius: BorderRadius.circular(22),
-          boxShadow: const [
-            BoxShadow(
-                color: Color(0x336366F1),
-                blurRadius: 26,
-                offset: Offset(0, 12)),
-          ],
-        ),
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('START HERE',
+      padding: const EdgeInsets.fromLTRB(24, 18, 0, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(right: 24),
+            child: Text('LISTS',
                 style: TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
-                    color: Color(0xCCFFFFFF),
-                    letterSpacing: 1.4)),
-            const SizedBox(height: 10),
-            Text(task['title']?.toString() ?? '',
-                style: const TextStyle(
-                    fontSize: 20,
-                    height: 1.3,
-                    fontWeight: FontWeight.w700,
-                    color: CupertinoColors.white)),
-            if ((task['why'] ?? '').toString().isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(task['why'].toString(),
-                  style: const TextStyle(
-                      fontSize: 13,
-                      height: 1.4,
-                      color: Color(0xCCFFFFFF))),
-            ],
-            const SizedBox(height: 14),
-            Row(children: [
-              const Icon(CupertinoIcons.time,
-                  size: 15, color: Color(0xCCFFFFFF)),
-              const SizedBox(width: 5),
-              Text('${task['minutes']} min',
-                  style: const TextStyle(
-                      fontSize: 13, color: Color(0xCCFFFFFF))),
-              if (extra > 0) ...[
-                const SizedBox(width: 14),
-                Text('$extra more unlocked',
-                    style: const TextStyle(
-                        fontSize: 13, color: Color(0x99FFFFFF))),
-              ],
-              const Spacer(),
-              GestureDetector(
-                onTap: () => _complete(id),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 9),
-                  decoration: BoxDecoration(
-                    color: CupertinoColors.white,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text('Done',
-                      style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w700,
-                          color: AppColors.accent)),
-                ),
-              ),
-            ]),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _goalsHeading() => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 30, 24, 10),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text('All goals',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
                     color: AppColors.textTertiary,
                     letterSpacing: 1.2)),
-            Text('${_goals.length}',
-                style: const TextStyle(
-                    fontSize: 13, color: AppColors.textTertiary)),
-          ],
-        ),
-      );
-
-  Widget _goalsList() {
-    if (_goals.isEmpty) {
-      return SliverToBoxAdapter(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text('No goals yet. Add one below.',
-              style: TextStyle(
-                  fontSize: 14, color: AppColors.textSecondary.withOpacity(1))),
-        ),
-      );
-    }
-    return SliverPadding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      sliver: SliverList.builder(
-        itemCount: _goals.length,
-        itemBuilder: (_, i) {
-          final g = _goals[i];
-          // `is` checks, not `as` casts: a wrong-typed value degrades to 0
-          // instead of throwing inside the build and blanking the screen.
-          final pct = g['pct_done'] is num ? (g['pct_done'] as num).toInt() : 0;
-          final total =
-              g['total_tasks'] is num ? (g['total_tasks'] as num).toInt() : 0;
-          final done =
-              g['done_tasks'] is num ? (g['done_tasks'] as num).toInt() : 0;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: GestureDetector(
-              onTap: () => _openGoal(g),
-              child: _glass(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(children: [
-                        Expanded(
-                          child: Text(g['title']?.toString() ?? '',
-                              style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.textPrimary)),
-                        ),
-                        const Icon(CupertinoIcons.chevron_right,
-                            size: 15, color: AppColors.textTertiary),
-                      ]),
-                      const SizedBox(height: 10),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(3),
-                        child: Container(
-                          height: 4,
-                          color: const Color(0x14000000),
-                          child: FractionallySizedBox(
-                            alignment: Alignment.centerLeft,
-                            widthFactor: pct / 100,
-                            child: Container(
-                              color: pct == 100
-                                  ? AppColors.success
-                                  : AppColors.accent,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 7),
-                      Text('$done of $total done  ·  $pct%',
-                          style: const TextStyle(
-                              fontSize: 12, color: AppColors.textSecondary)),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _newGoalCard() => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 26, 24, 0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('NEW GOAL',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textTertiary,
-                    letterSpacing: 1.2)),
-            const SizedBox(height: 8),
-            const Text(
-              'Type the outcome you want, not the steps. Hermes builds the '
-              'task list and keeps it ordered.',
-              style: TextStyle(
-                  fontSize: 13, height: 1.4, color: AppColors.textSecondary),
-            ),
-            const SizedBox(height: 12),
-            _glass(
-              child: CupertinoTextField(
-                controller: _goalController,
-                placeholder: 'e.g. Get a quant internship in Germany',
-                placeholderStyle:
-                    const TextStyle(color: AppColors.textTertiary),
-                padding: const EdgeInsets.all(15),
-                minLines: 2,
-                maxLines: 4,
-                style: const TextStyle(
-                    fontSize: 15, color: AppColors.textPrimary),
-                decoration: null,
-              ),
-            ),
-            const SizedBox(height: 12),
-            GestureDetector(
-              onTap: _busy ? null : _submit,
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 15),
-                decoration: BoxDecoration(
-                  gradient: _busy
-                      ? null
-                      : const LinearGradient(
-                          colors: [AppColors.accent, AppColors.accentSoft]),
-                  color: _busy ? AppColors.textTertiary : null,
-                  borderRadius: BorderRadius.circular(15),
-                ),
-                child: Text(_busy ? 'Hermes is planning…' : 'Build my plan',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: CupertinoColors.white)),
-              ),
-            ),
-          ],
-        ),
-      );
-
-  Widget _glass({required Widget child}) => Container(
-        decoration: BoxDecoration(
-          color: AppColors.glass,
-          borderRadius: BorderRadius.circular(18),
-          border: Border.all(color: const Color(0x14000000)),
-          boxShadow: const [
-            BoxShadow(
-                color: Color(0x0F000000), blurRadius: 20, offset: Offset(0, 6)),
-          ],
-        ),
-        child: child,
-      );
-}
-
-/// One goal, opened: the full checklist with tickable rows.
-///
-/// This is where the dependency model becomes visible. A blocked task is shown
-/// greyed with the name of what it is waiting on, so the user can see WHY it
-/// cannot be started instead of assuming the app is broken.
-class GoalDetailPage extends StatefulWidget {
-  const GoalDetailPage({super.key, required this.api, required this.goal});
-
-  final Api api;
-  final Map<String, dynamic> goal;
-
-  @override
-  State<GoalDetailPage> createState() => _GoalDetailPageState();
-}
-
-class _GoalDetailPageState extends State<GoalDetailPage> {
-  final _taskController = TextEditingController();
-
-  bool _loading = true;
-  bool _adding = false;
-  String? _error;
-  GoalTasks? _goal;
-  List<Map<String, dynamic>> _tasks = [];
-
-  @override
-  void initState() {
-    super.initState();
-    Future.microtask(_load);
-  }
-
-  @override
-  void dispose() {
-    _taskController.dispose();
-    super.dispose();
-  }
-
-  // GET /goals (goal_progress view) keys the identifier as `goal_id`, not
-  // `id`. Fall back to `id` for goal maps that came from POST /goals (a raw
-  // goals-table row). A missing key degrades to '' and the loader below shows
-  // an error instead of requesting /goals/null/tasks or throwing.
-  String get _goalId =>
-      (widget.goal['goal_id'] ?? widget.goal['id'] ?? '').toString();
-
-  Future<void> _load() async {
-    final goalId = _goalId;
-    if (goalId.isEmpty) {
-      // No identifier arrived with the goal map: say so instead of requesting
-      // /goals//tasks and showing a confusing server error.
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'This goal has no id, so its tasks cannot be loaded.';
-      });
-      return;
-    }
-    try {
-      final data = await widget.api.goalTasks(goalId);
-      final parsed = GoalTasks.fromJson(data);
-      if (!mounted) return;
-      setState(() {
-        _goal = parsed;
-        _tasks = parsed.tasks;
-        _loading = false;
-        _error = null;
-      });
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = e.message;
-      });
-    } catch (e) {
-      // GoalTasks.fromJson must never throw, but if it ever does the page
-      // shows a message and a retry instead of a blank screen.
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'Something went wrong: $e';
-      });
-    }
-  }
-
-  Future<void> _toggle(Map<String, dynamic> task) async {
-    final id = (task['id'] ?? '').toString();
-    if (id.isEmpty) {
-      if (!mounted) return;
-      setState(() => _error = 'This task has no id, so it cannot be saved.');
-      return;
-    }
-    final wasDone = task['status'] == 'done';
-    // Optimistic flip so the tap feels instant.
-    setState(() {
-      for (final t in _tasks) {
-        if ((t['id'] ?? '').toString() == id && id.isNotEmpty) {
-          t['status'] = wasDone ? 'todo' : 'done';
-        }
-      }
-    });
-    try {
-      if (wasDone) {
-        await widget.api.reopenTask(id);
-      } else {
-        await widget.api.completeTask(id);
-      }
-      await _load();
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _error = 'Could not save: ${e.message}');
-      await _load();
-    }
-  }
-
-  Future<void> _addTask() async {
-    final title = _taskController.text.trim();
-    if (title.isEmpty || _adding) return;
-    setState(() => _adding = true);
-    try {
-      await widget.api.addTask(_goalId, title);
-      _taskController.clear();
-      await _load();
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.message);
-    } finally {
-      if (mounted) setState(() => _adding = false);
-    }
-  }
-
-  Future<void> _confirmDelete() async {
-    final ok = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (ctx) => CupertinoAlertDialog(
-        title: const Text('Delete this goal?'),
-        content: Text('“${widget.goal['title']}” and its '
-            '${_tasks.length} tasks will be removed.'),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
           ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete'),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              for (var i = 0; i < chips.length; i++) ...[
+                chips[i],
+                if (i < chips.length - 1) const SizedBox(width: 8),
+              ],
+              const SizedBox(width: 24),
+            ]),
           ),
         ],
       ),
     );
-    if (ok != true) return;
-    try {
-      await widget.api.deleteGoal(_goalId);
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.message);
-    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final pct = _goal?.pctDone ?? 0;
-    final done = _goal?.done ?? 0;
-    final total = _goal?.total ?? 0;
+  int _visibleCountAll() {
+    var open = 0;
+    for (final entry in _tasksByGoal.entries) {
+      for (final t in entry.value) {
+        if ((t['status'] ?? '').toString() != 'done') open++;
+      }
+    }
+    return open;
+  }
 
-    return CupertinoPageScaffold(
-      navigationBar: CupertinoNavigationBar(
-        middle: const Text('Goal'),
-        trailing: CupertinoButton(
-          padding: EdgeInsets.zero,
-          minSize: 0,
-          onPressed: _confirmDelete,
-          child: const Icon(CupertinoIcons.trash,
-              size: 20, color: AppColors.danger),
-        ),
-      ),
+  Widget _listChip(String id, String title, int open) {
+    final selected = _selectedListId == id;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedListId = id),
       child: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [AppColors.bgTop, AppColors.bgBase],
-          ),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          gradient: selected
+              ? const LinearGradient(
+                  colors: [AppColors.accent, AppColors.accentSoft])
+              : null,
+          color: selected ? null : AppColors.glass,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+              color: selected
+                  ? const Color(0x00000000)
+                  : const Color(0x14000000)),
         ),
-        child: _loading
-            ? const Center(child: CupertinoActivityIndicator())
-            // CustomScrollView + SliverList, not ListView: this is the same
-            // pattern the other two apps use and that CI has already verified
-            // compiles with a Cupertino-only import set.
-            : CustomScrollView(
-                slivers: [
-                  SliverPadding(
-                    padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
-                    sliver: SliverList(
-                      delegate: SliverChildListDelegate([
-                        Text(widget.goal['title']?.toString() ?? '',
-                            style: const TextStyle(
-                                fontSize: 24,
-                                height: 1.25,
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.textPrimary)),
-                        const SizedBox(height: 14),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: Container(
-                            height: 6,
-                            color: const Color(0x14000000),
-                            child: FractionallySizedBox(
-                              alignment: Alignment.centerLeft,
-                              widthFactor: pct / 100,
-                              child: Container(
-                                color: pct == 100
-                                    ? AppColors.success
-                                    : AppColors.accent,
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text('$done of $total done  ·  $pct%',
-                            style: const TextStyle(
-                                fontSize: 13, color: AppColors.textSecondary)),
-                        if (_error != null) ...[
-                          const SizedBox(height: 14),
-                          Text(_error!,
-                              style: const TextStyle(
-                                  fontSize: 13, color: AppColors.danger)),
-                        ],
-                        const SizedBox(height: 22),
-                        for (final t in _tasks) _taskRow(t),
-                        const SizedBox(height: 20),
-                        _addTaskField(),
-                      ]),
-                    ),
-                  ),
-                ],
-              ),
+        child: Text(
+          open > 0 ? '$title · $open' : title,
+          style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: selected
+                  ? CupertinoColors.white
+                  : AppColors.textPrimary),
+        ),
       ),
     );
   }
 
-  Widget _taskRow(Map<String, dynamic> raw) {
-    final task = TaskState.fromJson(raw);
-    final isDone = task.isDone;
-    final isSkipped = task.isSkipped;
-    final startable = task.startable;
-
+  Widget _filterRow() {
+    final visible = _visibleTasks();
+    var done = 0;
+    for (final t in visible) {
+      if ((t['status'] ?? '').toString() == 'done') done++;
+    }
     return Padding(
-      padding: const EdgeInsets.only(bottom: 9),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+      child: Row(children: [
+        Expanded(
+          child: Text(
+            visible.isEmpty
+                ? 'Nothing here'
+                : done > 0
+                    ? '${visible.length} tasks · $done done'
+                    : '${visible.length} tasks',
+            style: const TextStyle(
+                fontSize: 12, color: AppColors.textSecondary),
+          ),
+        ),
+        const Text('Hide completed',
+            style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
+        const SizedBox(width: 8),
+        CupertinoSwitch(
+          value: _hideCompleted,
+          activeColor: AppColors.accent,
+          onChanged: (v) => setState(() => _hideCompleted = v),
+        ),
+      ]),
+    );
+  }
+
+  List<Widget> _sectionSlivers() {
+    final now = DateTime.now();
+    final visible = _visibleTasks();
+    if (visible.isEmpty) {
+      return [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 14, 24, 0),
+            child: glassBox(
+              child: const Padding(
+                padding: EdgeInsets.all(20),
+                child: Text(
+                  'Nothing scheduled. Add a task below or ask Hermes above.',
+                  style: TextStyle(
+                      fontSize: 14, color: AppColors.textSecondary)),
+              ),
+            ),
+          ),
+        ),
+      ];
+    }
+    const order = ['Overdue', 'Today', 'Tomorrow', 'Later', 'No date'];
+    final groups = _grouped(visible, now);
+    final out = <Widget>[];
+    for (final key in order) {
+      final list = groups[key]!;
+      if (list.isEmpty) continue;
+      out.add(SliverToBoxAdapter(child: _sectionHeading(key, list.length)));
+      out.add(
+        SliverPadding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          sliver: SliverList.builder(
+            itemCount: list.length,
+            itemBuilder: (_, i) => Padding(
+              padding: const EdgeInsets.only(bottom: 9),
+              child: _taskRow(list[i], now),
+            ),
+          ),
+        ),
+      );
+    }
+    return out;
+  }
+
+  Widget _sectionHeading(String title, int count) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 18, 24, 8),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(title.toUpperCase(),
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: title == 'Overdue'
+                        ? AppColors.danger
+                        : AppColors.textTertiary,
+                    letterSpacing: 1.1)),
+            Text('$count',
+                style:
+                    const TextStyle(fontSize: 12, color: AppColors.textTertiary)),
+          ],
+        ),
+      );
+
+  Color _priorityColor(int p) {
+    if (p == 1) return AppColors.danger;
+    if (p == 2) return AppColors.warning;
+    if (p == 4) return AppColors.textTertiary;
+    return AppColors.accent;
+  }
+
+  Widget _taskRow(Map<String, dynamic> t, DateTime now) {
+    final id = (t['id'] ?? '').toString();
+    final title = (t['title'] ?? '').toString();
+    final isDone = (t['status'] ?? '').toString() == 'done';
+    final priority = _priorityOf(t);
+    final startable = t['startable'] == true;
+    return GestureDetector(
+      onTap: () => _openDetail(t),
       child: Container(
         decoration: BoxDecoration(
           color: AppColors.glass,
@@ -870,14 +1105,15 @@ class _GoalDetailPageState extends State<GoalDetailPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             GestureDetector(
-              onTap: () => _toggle(raw),
+              onTap: () => _toggleTask(t),
               child: Container(
                 width: 24,
                 height: 24,
                 margin: const EdgeInsets.only(top: 1),
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: isDone ? AppColors.success : const Color(0x0F000000),
+                  color:
+                      isDone ? AppColors.success : const Color(0x0F000000),
                   border: Border.all(
                     color: isDone
                         ? AppColors.success
@@ -895,87 +1131,946 @@ class _GoalDetailPageState extends State<GoalDetailPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(task.title,
+                  Text(title.isEmpty ? '(untitled)' : title,
                       style: TextStyle(
                         fontSize: 15,
                         height: 1.3,
-                        fontWeight:
-                            startable && !isDone ? FontWeight.w600 : FontWeight.w400,
-                        color: isDone || isSkipped
+                        fontWeight: startable && !isDone
+                            ? FontWeight.w600
+                            : FontWeight.w400,
+                        color: isDone
                             ? AppColors.textTertiary
                             : AppColors.textPrimary,
                         decoration:
                             isDone ? TextDecoration.lineThrough : null,
                       )),
                   const SizedBox(height: 4),
-                  // Say WHY a task cannot start. A greyed row with no
-                  // explanation reads as a bug.
-                  Text(task.subtitle,
+                  Text(_subtitle(t, now),
                       style: TextStyle(
                           fontSize: 12,
                           color: isDone
                               ? AppColors.success
-                              : startable
-                                  ? AppColors.accent
-                                  : AppColors.textTertiary)),
+                              : AppColors.textSecondary)),
                 ],
               ),
             ),
+            const SizedBox(width: 8),
+            Container(
+              width: 8,
+              height: 8,
+              margin: const EdgeInsets.only(top: 6),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isDone
+                    ? const Color(0x20000000)
+                    : _priorityColor(priority),
+              ),
+            ),
+            // Keep the id out of the visuals, but keep it reachable: a row
+            // without an id cannot be saved, and tapping it must explain that.
+            if (id.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 4, left: 4),
+                child: Icon(CupertinoIcons.exclamationmark_circle,
+                    size: 14, color: AppColors.danger),
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _addTaskField() => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('ADD A TASK',
+  /// Google Tasks-style bottom field: quick title entry plus optional
+  /// date/time, notes and priority.
+  Widget _quickAddCard() => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('ADD A TASK',
+                style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textTertiary,
+                    letterSpacing: 1.1)),
+            const SizedBox(height: 8),
+            glassBox(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(children: [
+                  Row(children: [
+                    Expanded(
+                      child: CupertinoTextField(
+                        controller: _quickAddController,
+                        placeholder: 'Add a task to ${_addTargetName()}',
+                        placeholderStyle:
+                            const TextStyle(color: AppColors.textTertiary),
+                        padding: const EdgeInsets.all(12),
+                        style: const TextStyle(
+                            fontSize: 14, color: AppColors.textPrimary),
+                        decoration: BoxDecoration(
+                          color: const Color(0x0F000000),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        onSubmitted: (_) => _quickAdd(),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: _adding ? null : _quickAdd,
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: _adding
+                              ? AppColors.textTertiary
+                              : AppColors.accent,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: _adding
+                            ? const CupertinoActivityIndicator(
+                                color: CupertinoColors.white)
+                            : const Icon(CupertinoIcons.add,
+                                size: 19, color: CupertinoColors.white),
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    _optionChip(
+                      icon: CupertinoIcons.calendar,
+                      label: _quickDue == null
+                          ? 'Date'
+                          : '${_quickDue!.day} ${_monthName(_quickDue!.month)} ${_fmtTime(_quickDue!)}',
+                      active: _quickDue != null,
+                      onTap: _pickQuickDue,
+                    ),
+                    const SizedBox(width: 8),
+                    _optionChip(
+                      icon: CupertinoIcons.flag,
+                      label: 'P${_quickPriority}',
+                      active: _quickPriority != 3,
+                      onTap: () => setState(() {
+                        _quickPriority = _quickPriority >= 4 ? 1 : _quickPriority + 1;
+                      }),
+                    ),
+                    const SizedBox(width: 8),
+                    _optionChip(
+                      icon: CupertinoIcons.square_list,
+                      label: _addTargetName(),
+                      active: false,
+                      onTap: _pickQuickGoal,
+                    ),
+                    const SizedBox(width: 8),
+                    _optionChip(
+                      icon: CupertinoIcons.ellipsis,
+                      label: 'More',
+                      active: _showQuickMore,
+                      onTap: () => setState(
+                          () => _showQuickMore = !_showQuickMore),
+                    ),
+                  ]),
+                  if (_showQuickMore) ...[
+                    const SizedBox(height: 8),
+                    CupertinoTextField(
+                      controller: _quickNotesController,
+                      placeholder: 'Notes (optional)',
+                      placeholderStyle:
+                          const TextStyle(color: AppColors.textTertiary),
+                      padding: const EdgeInsets.all(12),
+                      maxLines: 3,
+                      style: const TextStyle(
+                          fontSize: 14, color: AppColors.textPrimary),
+                      decoration: BoxDecoration(
+                        color: const Color(0x0F000000),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ],
+                ]),
+              ),
+            ),
+          ],
+        ),
+      );
+
+  String _addTargetName() {
+    if (_selectedListId != 'all') return _goalTitleOf(_selectedListId);
+    final gid = _quickTargetGoalId();
+    if (gid.isEmpty) return 'a list';
+    return _goalTitleOf(gid);
+  }
+
+  Widget _optionChip(
+      {required IconData icon,
+      required String label,
+      required bool active,
+      required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: active ? AppColors.accent : const Color(0x0F000000),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon,
+              size: 13,
+              color:
+                  active ? CupertinoColors.white : AppColors.textSecondary),
+          const SizedBox(width: 4),
+          Text(label,
               style: TextStyle(
                   fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.textTertiary,
-                  letterSpacing: 1.1)),
-          const SizedBox(height: 8),
-          Row(children: [
-            Expanded(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: AppColors.glass,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0x14000000)),
-                ),
-                child: CupertinoTextField(
-                  controller: _taskController,
-                  placeholder: 'What needs doing?',
-                  placeholderStyle:
-                      const TextStyle(color: AppColors.textTertiary),
-                  padding: const EdgeInsets.all(13),
-                  style: const TextStyle(
-                      fontSize: 14, color: AppColors.textPrimary),
-                  decoration: null,
-                  onSubmitted: (_) => _addTask(),
-                ),
+                  fontWeight: FontWeight.w600,
+                  color: active
+                      ? CupertinoColors.white
+                      : AppColors.textSecondary)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _newListCard() => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+        child: Row(children: [
+          Expanded(
+            child: CupertinoTextField(
+              controller: _newListController,
+              placeholder: 'New list name',
+              placeholderStyle:
+                  const TextStyle(color: AppColors.textTertiary),
+              padding: const EdgeInsets.all(12),
+              style: const TextStyle(
+                  fontSize: 14, color: AppColors.textPrimary),
+              decoration: BoxDecoration(
+                color: AppColors.glass,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0x14000000)),
+              ),
+              onSubmitted: (_) => _createList(),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: _creatingList ? null : _createList,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: _creatingList
+                    ? AppColors.textTertiary
+                    : AppColors.textPrimary,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                _creatingList ? 'Adding…' : 'Add list',
+                style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: CupertinoColors.white),
               ),
             ),
-            const SizedBox(width: 9),
-            GestureDetector(
-              onTap: _adding ? null : _addTask,
-              child: Container(
-                padding: const EdgeInsets.all(13),
-                decoration: BoxDecoration(
-                  color: _adding ? AppColors.textTertiary : AppColors.accent,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: const Icon(CupertinoIcons.add,
-                    size: 19, color: CupertinoColors.white),
-              ),
-            ),
-          ]),
-        ],
+          ),
+        ]),
       );
+
+  Widget _historyCard() => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 18, 24, 0),
+        child: glassBox(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('RECENT HERMS CHANGES',
+                    style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textTertiary,
+                        letterSpacing: 1.2)),
+                const SizedBox(height: 8),
+                for (final h in _history) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(_historyLine(h),
+                        style: const TextStyle(
+                            fontSize: 12,
+                            height: 1.4,
+                            color: AppColors.textSecondary)),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      );
+
+  String _historyLine(Map<String, dynamic> h) {
+    final instruction =
+        (h['instruction'] ?? h['command'] ?? h['text'] ?? '').toString();
+    final reply = (h['reply'] ?? h['result'] ?? '').toString();
+    if (instruction.isEmpty && reply.isEmpty) return 'Change applied.';
+    if (instruction.isEmpty) return reply;
+    if (reply.isEmpty) return instruction;
+    return '$instruction — $reply';
+  }
 }
 
+/// Task detail: edit title, date, time, all-day, notes, priority, minutes and
+/// the list it belongs to. Saves with `upsertTask` (id passed).
+class TaskDetailPage extends StatefulWidget {
+  const TaskDetailPage(
+      {super.key,
+      required this.api,
+      required this.task,
+      required this.goalId,
+      required this.goalTitle,
+      required this.goals});
+
+  final Api api;
+  final Map<String, dynamic> task;
+  final String goalId;
+  final String goalTitle;
+  final List<Map<String, dynamic>> goals;
+
+  @override
+  State<TaskDetailPage> createState() => _TaskDetailPageState();
+}
+
+class _TaskDetailPageState extends State<TaskDetailPage> {
+  final _titleController = TextEditingController();
+  final _notesController = TextEditingController();
+
+  DateTime? _due;
+  bool _allDay = false;
+  int _priority = 3;
+  int _minutes = 30;
+  String _listId = '';
+  bool _saving = false;
+  bool _deleting = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleController.text = (widget.task['title'] ?? '').toString();
+    _notesController.text = (widget.task['notes'] ?? '').toString();
+    final rawDue = (widget.task['scheduled_at'] ?? '').toString();
+    if (rawDue.isNotEmpty) {
+      try {
+        _due = DateTime.parse(rawDue);
+      } catch (_) {
+        _due = null;
+      }
+    }
+    final ad = widget.task['all_day'];
+    if (ad is num) {
+      _allDay = ad.toInt() == 1;
+    } else if (ad is bool) {
+      _allDay = ad;
+    }
+    final p = widget.task['priority'];
+    if (p is num) {
+      final v = p.toInt();
+      if (v >= 1 && v <= 4) _priority = v;
+    }
+    final m = widget.task['minutes'];
+    if (m is num) _minutes = m.toInt();
+    final gid = (widget.task['_goal_id'] ?? widget.goalId).toString();
+    // A task with no list arrives grouped under the pseudo list; keep the
+    // picker on "no list" rather than pretending it belongs to one.
+    _listId = gid == _noListId ? '' : gid;
+  }
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  String get _taskId => (widget.task['id'] ?? '').toString();
+
+  bool get _isDone => (widget.task['status'] ?? '').toString() == 'done';
+
+  String _goalIdOf(Map<String, dynamic> g) =>
+      (g['goal_id'] ?? g['id'] ?? '').toString();
+
+  String _pad2(int n) => n < 10 ? '0$n' : '$n';
+
+  String _fmtDay(DateTime d) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final mon = (d.month >= 1 && d.month <= 12) ? months[d.month - 1] : '';
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    final wd = days[d.weekday - 1];
+    return '$wd ${d.day} $mon ${d.year}';
+  }
+
+  String _fmtClock(DateTime d) {
+    var h = d.hour;
+    final suffix = h >= 12 ? 'PM' : 'AM';
+    var hh = h % 12;
+    if (hh == 0) hh = 12;
+    return '$hh:${_pad2(d.minute)} $suffix';
+  }
+
+  Future<void> _pickDate() async {
+    DateTime temp = _due ?? DateTime.now();
+    temp = DateTime(temp.year, temp.month, temp.day,
+        _due != null ? _due!.hour : 9, _due != null ? _due!.minute : 0);
+    DateTime picked = temp;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => Container(
+        height: 320,
+        color: CupertinoColors.white,
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            CupertinoButton(
+              child: const Text('No date'),
+              onPressed: () {
+                setState(() => _due = null);
+                Navigator.pop(ctx);
+              },
+            ),
+            CupertinoButton(
+              child: const Text('Done',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              onPressed: () {
+                setState(() {
+                  final keep = _due;
+                  if (keep != null) {
+                    _due = DateTime(picked.year, picked.month, picked.day,
+                        keep.hour, keep.minute);
+                  } else {
+                    _due = DateTime(
+                        picked.year, picked.month, picked.day, 9, 0);
+                  }
+                });
+                Navigator.pop(ctx);
+              },
+            ),
+          ]),
+          Expanded(
+            child: CupertinoDatePicker(
+              mode: CupertinoDatePickerMode.date,
+              initialDateTime: temp,
+              onDateTimeChanged: (d) => picked = d,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickTime() async {
+    if (_due == null || _allDay) return;
+    DateTime temp = _due!;
+    DateTime picked = temp;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => Container(
+        height: 320,
+        color: CupertinoColors.white,
+        child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+            CupertinoButton(
+              child: const Text('Done',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              onPressed: () {
+                setState(() {
+                  final keep = _due;
+                  if (keep != null) {
+                    _due = DateTime(keep.year, keep.month, keep.day,
+                        picked.hour, picked.minute);
+                  }
+                });
+                Navigator.pop(ctx);
+              },
+            ),
+          ]),
+          Expanded(
+            child: CupertinoDatePicker(
+              mode: CupertinoDatePickerMode.time,
+              initialDateTime: temp,
+              onDateTimeChanged: (d) => picked = d,
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _pickList() async {
+    if (widget.goals.isEmpty) return;
+    await showCupertinoModalPopup<void>(
+      context: context,
+      builder: (ctx) => CupertinoActionSheet(
+        title: const Text('Move to list'),
+        actions: [
+          for (final g in widget.goals)
+            CupertinoActionSheetAction(
+              onPressed: () {
+                Navigator.pop(ctx);
+                if (!mounted) return;
+                setState(() => _listId = _goalIdOf(g));
+              },
+              child: Text((g['title'] ?? 'Untitled').toString()),
+            ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Cancel'),
+        ),
+      ),
+    );
+  }
+
+  String _listName(String id) {
+    for (final g in widget.goals) {
+      if (_goalIdOf(g) == id) return (g['title'] ?? 'Untitled').toString();
+    }
+    if (id == widget.goalId) return widget.goalTitle;
+    return 'List';
+  }
+
+  Future<void> _save() async {
+    final title = _titleController.text.trim();
+    if (title.isEmpty || _saving) return;
+    if (_taskId.isEmpty) {
+      if (!mounted) return;
+      setState(() => _error = 'This task has no id, so it cannot be saved.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      String? scheduled;
+      if (_due != null) {
+        final d = _allDay
+            ? DateTime(_due!.year, _due!.month, _due!.day, 0, 0)
+            : _due!;
+        scheduled =
+            '${d.year}-${_pad2(d.month)}-${_pad2(d.day)}T${_pad2(d.hour)}:${_pad2(d.minute)}:00';
+      }
+      final notes = _notesController.text.trim();
+      await widget.api.upsertTask(
+        id: _taskId,
+        title: title,
+        scheduledAt: scheduled,
+        minutes: _minutes,
+        allDay: _due == null ? null : _allDay,
+        notes: notes.isEmpty ? null : notes,
+        goalId: (_listId.isEmpty || _listId == _noListId) ? null : _listId,
+        priority: _priority,
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _toggleDone() async {
+    if (_taskId.isEmpty) return;
+    try {
+      if (_isDone) {
+        await widget.api.reopenTask(_taskId);
+      } else {
+        await widget.api.completeTask(_taskId);
+      }
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() => _error = e.message);
+    }
+  }
+
+  Future<void> _remove() async {
+    if (_taskId.isEmpty) return;
+    final ok = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (ctx) => CupertinoAlertDialog(
+        title: const Text('Delete this task?'),
+        content: Text('“${_titleController.text.trim()}” will be removed.'),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _deleting = true);
+    try {
+      await widget.api.deleteTask(_taskId);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.message;
+        _deleting = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(
+        middle: const Text('Task'),
+        trailing: CupertinoButton(
+          padding: EdgeInsets.zero,
+          minSize: 0,
+          onPressed: _deleting ? null : _remove,
+          child: const Icon(CupertinoIcons.trash,
+              size: 20, color: AppColors.danger),
+        ),
+      ),
+      child: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [AppColors.bgTop, AppColors.bgBase],
+          ),
+        ),
+        child: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 40),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                glassBox(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('TITLE',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.textTertiary,
+                                letterSpacing: 1.1)),
+                        const SizedBox(height: 6),
+                        CupertinoTextField(
+                          controller: _titleController,
+                          placeholder: 'Task title',
+                          placeholderStyle: const TextStyle(
+                              color: AppColors.textTertiary),
+                          padding: const EdgeInsets.all(12),
+                          maxLines: 3,
+                          style: const TextStyle(
+                              fontSize: 16, color: AppColors.textPrimary),
+                          decoration: BoxDecoration(
+                            color: const Color(0x0F000000),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        const Text('NOTES',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.textTertiary,
+                                letterSpacing: 1.1)),
+                        const SizedBox(height: 6),
+                        CupertinoTextField(
+                          controller: _notesController,
+                          placeholder: 'Add notes',
+                          placeholderStyle: const TextStyle(
+                              color: AppColors.textTertiary),
+                          padding: const EdgeInsets.all(12),
+                          maxLines: 4,
+                          style: const TextStyle(
+                              fontSize: 14, color: AppColors.textPrimary),
+                          decoration: BoxDecoration(
+                            color: const Color(0x0F000000),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                glassBox(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(children: [
+                      Row(children: [
+                        const Expanded(
+                          child: Text('Date',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        GestureDetector(
+                          onTap: _pickDate,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0x0F000000),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              _due == null ? 'No date' : _fmtDay(_due!),
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.accent),
+                            ),
+                          ),
+                        ),
+                      ]),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        const Expanded(
+                          child: Text('All-day',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        CupertinoSwitch(
+                          value: _allDay,
+                          activeColor: AppColors.accent,
+                          onChanged: _due == null
+                              ? null
+                              : (v) => setState(() => _allDay = v),
+                        ),
+                      ]),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        const Expanded(
+                          child: Text('Time',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        GestureDetector(
+                          onTap:
+                              (_due == null || _allDay) ? null : _pickTime,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0x0F000000),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              _due == null
+                                  ? '—'
+                                  : _allDay
+                                      ? 'All day'
+                                      : _fmtClock(_due!),
+                              style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: (_due == null || _allDay)
+                                      ? AppColors.textTertiary
+                                      : AppColors.accent),
+                            ),
+                          ),
+                        ),
+                      ]),
+                    ]),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                glassBox(
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(children: [
+                      Row(children: [
+                        const Expanded(
+                          child: Text('List',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        GestureDetector(
+                          onTap: _pickList,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: const Color(0x0F000000),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              _listName(_listId),
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.accent),
+                            ),
+                          ),
+                        ),
+                      ]),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        const Expanded(
+                          child: Text('Priority',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        Row(children: [
+                          for (var p = 1; p <= 4; p++) ...[
+                            GestureDetector(
+                              onTap: () =>
+                                  setState(() => _priority = p),
+                              child: Container(
+                                width: 34,
+                                height: 34,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: _priority == p
+                                      ? AppColors.accent
+                                      : const Color(0x0F000000),
+                                ),
+                                child: Text('P$p',
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: _priority == p
+                                            ? CupertinoColors.white
+                                            : AppColors.textSecondary)),
+                              ),
+                            ),
+                            if (p < 4) const SizedBox(width: 6),
+                          ],
+                        ]),
+                      ]),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        const Expanded(
+                          child: Text('Minutes',
+                              style: TextStyle(
+                                  fontSize: 15,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        GestureDetector(
+                          onTap: () => setState(() {
+                            if (_minutes > 5) _minutes -= 5;
+                          }),
+                          child: Container(
+                            width: 34,
+                            height: 34,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: const Color(0x0F000000),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(CupertinoIcons.minus,
+                                size: 15, color: AppColors.textPrimary),
+                          ),
+                        ),
+                        Padding(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 12),
+                          child: Text('$_minutes',
+                              style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppColors.textPrimary)),
+                        ),
+                        GestureDetector(
+                          onTap: () => setState(() => _minutes += 5),
+                          child: Container(
+                            width: 34,
+                            height: 34,
+                            alignment: Alignment.center,
+                            decoration: BoxDecoration(
+                              color: const Color(0x0F000000),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(CupertinoIcons.add,
+                                size: 15, color: AppColors.textPrimary),
+                          ),
+                        ),
+                      ]),
+                    ]),
+                  ),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(_error!,
+                      style: const TextStyle(
+                          fontSize: 13, color: AppColors.danger)),
+                ],
+                const SizedBox(height: 18),
+                GestureDetector(
+                  onTap: _saving ? null : _save,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 15),
+                    decoration: BoxDecoration(
+                      gradient: _saving
+                          ? null
+                          : const LinearGradient(colors: [
+                              AppColors.accent,
+                              AppColors.accentSoft
+                            ]),
+                      color: _saving ? AppColors.textTertiary : null,
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: Text(_saving ? 'Saving…' : 'Save changes',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: CupertinoColors.white)),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                GestureDetector(
+                  onTap: _toggleDone,
+                  child: Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    decoration: BoxDecoration(
+                      color: AppColors.glass,
+                      borderRadius: BorderRadius.circular(15),
+                      border:
+                          Border.all(color: const Color(0x14000000)),
+                    ),
+                    child: Text(
+                        _isDone ? 'Mark as not done' : 'Mark as done',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.success)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 /// Shown instead of Flutter's default ErrorWidget when a widget's build throws.
 ///
