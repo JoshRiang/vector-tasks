@@ -120,6 +120,20 @@
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row0_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
     <LinearLayout
         android:id="@+id/row1"
@@ -164,6 +178,20 @@
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row1_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
     <LinearLayout
         android:id="@+id/row2"
@@ -208,6 +236,20 @@
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row2_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
     <LinearLayout
         android:id="@+id/row3"
@@ -252,6 +294,20 @@
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row3_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
     <LinearLayout
         android:id="@+id/row4"
@@ -296,6 +352,20 @@
                 android:textColor="#8E8E93"
                 android:maxLines="1" />
         </LinearLayout>
+
+        <TextView
+            android:id="@+id/row4_pri"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingTop="2dp"
+            android:paddingBottom="2dp"
+            android:textSize="9sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:background="#C7C7CC" />
     </LinearLayout>
 
 </LinearLayout>

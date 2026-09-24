@@ -104,7 +104,6 @@ class _HomePageState extends State<HomePage> {
   late Api _api;
 
   bool _loading = true;
-  bool _sendingCommand = false;
   bool _adding = false;
   bool _creatingList = false;
   String? _error;
@@ -122,8 +121,6 @@ class _HomePageState extends State<HomePage> {
   String _dayStr(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${_pad2(d.month)}-${_pad2(d.day)}';
 
-  List<Map<String, String>> _exchanges = [];
-  List<Map<String, dynamic>> _history = [];
 
   DateTime? _quickDue;
   int _quickPriority = 3;
@@ -257,14 +254,6 @@ class _HomePageState extends State<HomePage> {
       }
       Api.beacon('reload', 'calendar ok extra=${dated.length}');
 
-      stage = 'history';
-      List<Map<String, dynamic>> history = [];
-      try {
-        history = await _api.commandHistory();
-      } catch (_) {
-        history = [];
-      }
-      Api.beacon('reload', 'history ok n=${history.length}');
       if (!mounted) return;
       Api.beacon('reload', 'about to setState with data');
       setState(() {
@@ -272,7 +261,6 @@ class _HomePageState extends State<HomePage> {
         _tasksByGoal = byGoal;
         _goalTitles = titles;
         _doneToday = doneToday;
-        _history = history.length > 5 ? history.sublist(0, 5) : history;
         if (_selectedListId != 'all' && !titles.containsKey(_selectedListId)) {
           _selectedListId = 'all';
         }
@@ -635,60 +623,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _sendCommand() async {
-    final text = _commandController.text.trim();
-    if (text.isEmpty || _sendingCommand) return;
-    setState(() {
-      _sendingCommand = true;
-      _error = null;
-    });
-    try {
-      final res = await _api.command(text);
-      final reply = (res['reply'] ?? '').toString();
-      final problems = <String>[];
-      final applied = res['applied'];
-      if (applied is List) {
-        for (final e in applied) {
-          if (e is Map) {
-            final m = Map<String, dynamic>.from(e);
-            final err = (m['error'] ?? '').toString();
-            if (err.isNotEmpty) {
-              final what =
-                  (m['title'] ?? m['action'] ?? 'change').toString();
-              problems.add('$what: $err');
-            }
-          }
-        }
-      }
-      _commandController.clear();
-      if (!mounted) return;
-      setState(() {
-        final shown = reply.isEmpty ? 'Done.' : reply;
-        if (problems.isNotEmpty) {
-          _exchanges.insert(0, {
-            'q': text,
-            'a': '$shown\nPartial failure: ${problems.join('; ')}',
-          });
-        } else {
-          _exchanges.insert(0, {'q': text, 'a': shown});
-        }
-        if (_exchanges.length > 5) {
-          _exchanges = _exchanges.sublist(0, 5);
-        }
-      });
-      await _reload();
-      if (!mounted) return;
-      if (problems.isNotEmpty) {
-        setState(() =>
-            _error = 'Hermes applied some changes, but: ${problems.join('; ')}');
-      }
-    } on ApiException catch (e) {
-      if (!mounted) return;
-      setState(() => _error = e.message);
-    } finally {
-      if (mounted) setState(() => _sendingCommand = false);
-    }
-  }
 
   void _openDetail(Map<String, dynamic> task) {
     final gid = (task['_goal_id'] ?? '').toString();
@@ -734,14 +668,11 @@ class _HomePageState extends State<HomePage> {
                     SliverToBoxAdapter(child: _header()),
                     if (_error != null)
                       SliverToBoxAdapter(child: _errorBanner(_error!)),
-                    SliverToBoxAdapter(child: _commandCard()),
                     SliverToBoxAdapter(child: _listSelector()),
                     SliverToBoxAdapter(child: _filterRow()),
                     ..._sectionSlivers(),
                     SliverToBoxAdapter(child: _quickAddCard()),
                     SliverToBoxAdapter(child: _newListCard()),
-                    if (_history.isNotEmpty)
-                      SliverToBoxAdapter(child: _historyCard()),
                     const SliverToBoxAdapter(child: SizedBox(height: 40)),
                   ],
                 ),
@@ -808,146 +739,6 @@ class _HomePageState extends State<HomePage> {
       );
 
   /// Hermes command bar: type an instruction, read the reply, see what changed.
-  Widget _commandCard() => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 18, 24, 0),
-        child: glassBox(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('ASK HERMES',
-                    style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textTertiary,
-                        letterSpacing: 1.2)),
-                const SizedBox(height: 8),
-                Row(children: [
-                  Expanded(
-                    child: CupertinoTextField(
-                      controller: _commandController,
-                      placeholder:
-                          'e.g. move groceries to tomorrow morning',
-                      placeholderStyle:
-                          const TextStyle(color: AppColors.textTertiary),
-                      padding: const EdgeInsets.all(12),
-                      style: const TextStyle(
-                          fontSize: 14, color: AppColors.textPrimary),
-                      decoration: BoxDecoration(
-                        color: const Color(0x0F000000),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      onSubmitted: (_) => _sendCommand(),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: _sendingCommand ? null : _sendCommand,
-                    child: Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: _sendingCommand
-                            ? AppColors.textTertiary
-                            : AppColors.accent,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: _sendingCommand
-                          ? const CupertinoActivityIndicator(
-                              color: CupertinoColors.white)
-                          : const Icon(CupertinoIcons.arrow_up,
-                              size: 18, color: CupertinoColors.white),
-                    ),
-                  ),
-                ]),
-                for (final ex in _exchanges) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: const Color(0x0A6366F1),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(ex['q'] ?? '',
-                            style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textPrimary)),
-                        const SizedBox(height: 4),
-                        Text(ex['a'] ?? '',
-                            style: const TextStyle(
-                                fontSize: 12,
-                                height: 1.4,
-                                color: AppColors.textSecondary)),
-                      ],
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      );
-
-  /// Lists = goals, plus an "All tasks" view. A horizontal chip row works as
-  /// the segmented control for an arbitrary number of lists.
-  Widget _listSelector() {
-    final chips = <Widget>[];
-    chips.add(_listChip('all', 'All tasks', _visibleCountAll()));
-    for (final g in _goals) {
-      final gid = _goalId(g);
-      if (gid.isEmpty) continue;
-      final list = _tasksByGoal[gid];
-      var open = 0;
-      if (list != null) {
-        for (final t in list) {
-          if ((t['status'] ?? '').toString() != 'done') open++;
-        }
-      }
-      chips.add(_listChip(gid, (g['title'] ?? 'Untitled').toString(), open));
-    }
-    // Dated tasks with no goal get their own chip, otherwise the only way to
-    // reach something created by an instruction is the catch-all "All" view.
-    final noList = _tasksByGoal[kNoListId];
-    if (noList != null && noList.isNotEmpty) {
-      var open = 0;
-      for (final t in noList) {
-        if ((t['status'] ?? '').toString() != 'done') open++;
-      }
-      chips.add(_listChip(kNoListId, 'No list', open));
-    }
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(24, 18, 0, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Padding(
-            padding: EdgeInsets.only(right: 24),
-            child: Text('LISTS',
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: AppColors.textTertiary,
-                    letterSpacing: 1.2)),
-          ),
-          const SizedBox(height: 8),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(children: [
-              for (var i = 0; i < chips.length; i++) ...[
-                chips[i],
-                if (i < chips.length - 1) const SizedBox(width: 8),
-              ],
-              const SizedBox(width: 24),
-            ]),
-          ),
-        ],
-      ),
-    );
-  }
 
   int _visibleCountAll() {
     var open = 0;
@@ -1093,6 +884,15 @@ class _HomePageState extends State<HomePage> {
     return AppColors.accent;
   }
 
+  /// Short label for a priority, shown next to its colour.
+  String _priorityLabel(int p) {
+    if (p <= 1) return 'P1';
+    if (p == 2) return 'P2';
+    if (p == 3) return 'P3';
+    if (p == 4) return 'P4';
+    return 'P5';
+  }
+
   Widget _taskRow(Map<String, dynamic> t, DateTime now) {
     final id = (t['id'] ?? '').toString();
     final title = (t['title'] ?? '').toString();
@@ -1166,17 +966,25 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
             const SizedBox(width: 8),
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(top: 6),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: isDone
-                    ? const Color(0x20000000)
-                    : _priorityColor(priority),
+            // A labelled priority badge, not just a coloured dot. The user
+            // asked for the priority to be visible, and colour alone is not
+            // readable for everyone.
+            if (!isDone)
+              Container(
+                margin: const EdgeInsets.only(top: 2),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _priorityColor(priority),
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(_priorityLabel(priority),
+                    style: const TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w800,
+                        color: CupertinoColors.white,
+                        letterSpacing: 0.3)),
               ),
-            ),
             // Keep the id out of the visuals, but keep it reachable: a row
             // without an id cannot be saved, and tapping it must explain that.
             if (id.isEmpty)
@@ -1385,124 +1193,6 @@ class _HomePageState extends State<HomePage> {
         ]),
       );
 
-  Widget _historyCard() => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 18, 24, 0),
-        child: glassBox(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('RECENT HERMS CHANGES',
-                    style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textTertiary,
-                        letterSpacing: 1.2)),
-                const SizedBox(height: 8),
-                for (final h in _history) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Text(_historyLine(h),
-                        style: const TextStyle(
-                            fontSize: 12,
-                            height: 1.4,
-                            color: AppColors.textSecondary)),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      );
-
-  /// One line of the command history.
-  ///
-  /// GET /commands returns chat rows keyed {id, role, content, created_at} —
-  /// NOT instruction/reply. Reading the wrong keys made every history entry
-  /// fall through to the placeholder, so real past instructions were invisible.
-  /// The other key names are still tried for older servers.
-  String _historyLine(Map<String, dynamic> h) {
-    final role = (h['role'] ?? '').toString();
-    final content = (h['content'] ??
-            h['instruction'] ??
-            h['reply'] ??
-            h['text'] ??
-            h['result'] ??
-            '')
-        .toString();
-    if (content.isEmpty) return 'Change applied.';
-    if (role == 'user') return 'You: $content';
-    if (role == 'assistant') return content;
-    return content;
-  }
-}
-
-/// Task detail: edit title, date, time, all-day, notes, priority, minutes and
-/// the list it belongs to. Saves with `upsertTask` (id passed).
-class TaskDetailPage extends StatefulWidget {
-  const TaskDetailPage(
-      {super.key,
-      required this.api,
-      required this.task,
-      required this.goalId,
-      required this.goalTitle,
-      required this.goals});
-
-  final Api api;
-  final Map<String, dynamic> task;
-  final String goalId;
-  final String goalTitle;
-  final List<Map<String, dynamic>> goals;
-
-  @override
-  State<TaskDetailPage> createState() => _TaskDetailPageState();
-}
-
-class _TaskDetailPageState extends State<TaskDetailPage> {
-  final _titleController = TextEditingController();
-  final _notesController = TextEditingController();
-
-  DateTime? _due;
-  bool _allDay = false;
-  int _priority = 3;
-  int _minutes = 30;
-  String _listId = '';
-  bool _saving = false;
-  bool _deleting = false;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _titleController.text = (widget.task['title'] ?? '').toString();
-    _notesController.text = (widget.task['notes'] ?? '').toString();
-    final rawDue = (widget.task['scheduled_at'] ?? '').toString();
-    if (rawDue.isNotEmpty) {
-      try {
-        _due = DateTime.parse(rawDue);
-      } catch (_) {
-        _due = null;
-      }
-    }
-    final ad = widget.task['all_day'];
-    if (ad is num) {
-      _allDay = ad.toInt() == 1;
-    } else if (ad is bool) {
-      _allDay = ad;
-    }
-    final p = widget.task['priority'];
-    if (p is num) {
-      final v = p.toInt();
-      if (v >= 1 && v <= 4) _priority = v;
-    }
-    final m = widget.task['minutes'];
-    if (m is num) _minutes = m.toInt();
-    final gid = (widget.task['_goal_id'] ?? widget.goalId).toString();
-    // A task with no list arrives grouped under the pseudo list; keep the
-    // picker on "no list" rather than pretending it belongs to one.
-    _listId = gid == kNoListId ? '' : gid;
-  }
 
   @override
   void dispose() {
