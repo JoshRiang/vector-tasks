@@ -2,11 +2,25 @@
 library;
 
 import 'dart:async';
+// ImageFilter comes from dart:ui. It may also be re-exported by
+// package:flutter/widgets.dart, but importing it explicitly is unambiguous and
+// costs nothing -- guessing wrong here is a full CI cycle.
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/cupertino.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api_client.dart';
+
+/// Viewer mode: the apps are a window onto the plan, Hermes is the manager and
+/// Telegram is how the user talks to it. When true the app hides every editing
+/// surface (quick-add, editors, expense entry) so exactly one writer changes
+/// the data -- two writers disagreeing is how the list and the calendar drift
+/// apart. Flip it with --dart-define=VECTOR_READ_ONLY=false for an editable
+/// build; the default is viewer.
+const bool kReadOnly =
+    bool.fromEnvironment('VECTOR_READ_ONLY', defaultValue: true);
+
 
 /// Pseudo list for dated tasks that belong to no goal.
 ///
@@ -54,17 +68,41 @@ class AppColors {
 }
 
 /// Frosted card shared by every surface in the app.
-Widget glassBox({required Widget child}) => Container(
-      decoration: BoxDecoration(
-        color: AppColors.glass,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0x14000000)),
-        boxShadow: const [
-          BoxShadow(
-              color: Color(0x0F000000), blurRadius: 20, offset: Offset(0, 6)),
-        ],
+///
+/// REAL Liquid Glass, not just translucency: a BackdropFilter blurs whatever is
+/// painted behind the card (the background gradient and any card it overlaps),
+/// then a translucent white fill sits on top. A plain semi-transparent white
+/// looks flat because it shows the backdrop unblurred; the blur is what makes it
+/// read as a pane of glass.
+Widget glassBox({required Widget child, double radius = 18, EdgeInsets? padding}) =>
+    ClipRRect(
+      borderRadius: BorderRadius.circular(radius),
+      child: BackdropFilter(
+        // 18 is enough to dissolve the background into a soft wash while
+        // keeping the shapes behind it legible.
+        filter: ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        child: Container(
+          padding: padding,
+          decoration: BoxDecoration(
+            // Two-stop fill: slightly brighter at the top so the pane catches
+            // light like real glass instead of being a flat wash.
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xE6FFFFFF), Color(0xB8FFFFFF)],
+            ),
+            borderRadius: BorderRadius.circular(radius),
+            // A hairline highlight on the top edge is what the eye reads as the
+            // glass's thickness.
+            border: Border.all(color: const Color(0x33FFFFFF), width: 1),
+            boxShadow: const [
+              BoxShadow(
+                  color: Color(0x14000000), blurRadius: 24, offset: Offset(0, 8)),
+            ],
+          ),
+          child: child,
+        ),
       ),
-      child: child,
     );
 
 class VectorTasksApp extends StatelessWidget {
@@ -681,8 +719,13 @@ class _HomePageState extends State<HomePage> {
                     SliverToBoxAdapter(child: _listSelector()),
                     SliverToBoxAdapter(child: _filterRow()),
                     ..._sectionSlivers(),
-                    SliverToBoxAdapter(child: _quickAddCard()),
-                    SliverToBoxAdapter(child: _newListCard()),
+                    // Viewer mode hides every writing surface: the app shows the
+                    // plan, Hermes makes it. One writer means the list and the
+                    // calendar cannot drift apart.
+                    if (!kReadOnly) ...[
+                      SliverToBoxAdapter(child: _quickAddCard()),
+                      SliverToBoxAdapter(child: _newListCard()),
+                    ],
                     const SliverToBoxAdapter(child: SizedBox(height: 40)),
                   ],
                 ),
