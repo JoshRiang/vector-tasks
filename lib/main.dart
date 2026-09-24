@@ -71,12 +71,22 @@ class VectorTasksApp extends StatelessWidget {
   const VectorTasksApp({super.key});
 
   @override
-  Widget build(BuildContext context) => const CupertinoApp(
+  Widget build(BuildContext context) => CupertinoApp(
         title: 'Vector Tasks',
         debugShowCheckedModeBanner: false,
         theme: CupertinoThemeData(
           primaryColor: AppColors.accent,
           scaffoldBackgroundColor: AppColors.bgBase,
+        ),
+        // Clamp the system text scale. Android lets the user pick up to 200%,
+        // and at that size titles and the priority badge pushed past the right
+        // edge of every row - the user's "if it overflow to the right" report.
+        // A bounded scale keeps the layout intact while still honouring a
+        // larger font up to a readable limit.
+        builder: (context, child) => MediaQuery.withClampedTextScaling(
+          minScaleFactor: 0.8,
+          maxScaleFactor: 1.2,
+          child: child ?? const SizedBox.shrink(),
         ),
         home: HomePage(),
       );
@@ -852,10 +862,13 @@ class _HomePageState extends State<HomePage> {
                 : done > 0
                     ? '${visible.length} tasks · $done done'
                     : '${visible.length} tasks',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: const TextStyle(
                 fontSize: 12, color: AppColors.textSecondary),
           ),
         ),
+        const SizedBox(width: 8),
         const Text('Hide completed',
             style: TextStyle(fontSize: 12, color: AppColors.textSecondary)),
         const SizedBox(width: 8),
@@ -917,14 +930,21 @@ class _HomePageState extends State<HomePage> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(title.toUpperCase(),
-                style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: title == 'Overdue'
-                        ? AppColors.danger
-                        : AppColors.textTertiary,
-                    letterSpacing: 1.1)),
+            // Flexible + ellipsis: a long section name (or a large system text
+            // scale) must never push the count off the right edge.
+            Flexible(
+              child: Text(title.toUpperCase(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: title == 'Overdue'
+                          ? AppColors.danger
+                          : AppColors.textTertiary,
+                      letterSpacing: 1.1)),
+            ),
+            const SizedBox(width: 8),
             Text('$count',
                 style:
                     const TextStyle(fontSize: 12, color: AppColors.textTertiary)),
