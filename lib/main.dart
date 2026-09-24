@@ -1194,6 +1194,80 @@ class _HomePageState extends State<HomePage> {
       );
 
 
+  /// One line of the command history.
+  ///
+  /// GET /commands returns chat rows keyed {id, role, content, created_at} —
+  /// NOT instruction/reply. Reading the wrong keys made every history entry
+  /// fall through to the placeholder, so real past instructions were invisible.
+  /// The other key names are still tried for older servers.
+}
+
+/// Task detail: edit title, date, time, all-day, notes, priority, minutes and
+/// the list it belongs to. Saves with `upsertTask` (id passed).
+class TaskDetailPage extends StatefulWidget {
+  const TaskDetailPage(
+      {super.key,
+      required this.api,
+      required this.task,
+      required this.goalId,
+      required this.goalTitle,
+      required this.goals});
+
+  final Api api;
+  final Map<String, dynamic> task;
+  final String goalId;
+  final String goalTitle;
+  final List<Map<String, dynamic>> goals;
+
+  @override
+  State<TaskDetailPage> createState() => _TaskDetailPageState();
+}
+
+class _TaskDetailPageState extends State<TaskDetailPage> {
+  final _titleController = TextEditingController();
+  final _notesController = TextEditingController();
+
+  DateTime? _due;
+  bool _allDay = false;
+  int _priority = 3;
+  int _minutes = 30;
+  String _listId = '';
+  bool _saving = false;
+  bool _deleting = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _titleController.text = (widget.task['title'] ?? '').toString();
+    _notesController.text = (widget.task['notes'] ?? '').toString();
+    final rawDue = (widget.task['scheduled_at'] ?? '').toString();
+    if (rawDue.isNotEmpty) {
+      try {
+        _due = DateTime.parse(rawDue);
+      } catch (_) {
+        _due = null;
+      }
+    }
+    final ad = widget.task['all_day'];
+    if (ad is num) {
+      _allDay = ad.toInt() == 1;
+    } else if (ad is bool) {
+      _allDay = ad;
+    }
+    final p = widget.task['priority'];
+    if (p is num) {
+      final v = p.toInt();
+      if (v >= 1 && v <= 4) _priority = v;
+    }
+    final m = widget.task['minutes'];
+    if (m is num) _minutes = m.toInt();
+    final gid = (widget.task['_goal_id'] ?? widget.goalId).toString();
+    // A task with no list arrives grouped under the pseudo list; keep the
+    // picker on "no list" rather than pretending it belongs to one.
+    _listId = gid == kNoListId ? '' : gid;
+  }
+
   @override
   void dispose() {
     _titleController.dispose();
