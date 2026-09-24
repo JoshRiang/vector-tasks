@@ -750,6 +750,61 @@ class _HomePageState extends State<HomePage> {
     return open;
   }
 
+  Widget _listSelector() {
+    final chips = <Widget>[];
+    chips.add(_listChip('all', 'All tasks', _visibleCountAll()));
+    for (final g in _goals) {
+      final gid = _goalId(g);
+      if (gid.isEmpty) continue;
+      final list = _tasksByGoal[gid];
+      var open = 0;
+      if (list != null) {
+        for (final t in list) {
+          if ((t['status'] ?? '').toString() != 'done') open++;
+        }
+      }
+      chips.add(_listChip(gid, (g['title'] ?? 'Untitled').toString(), open));
+    }
+    // Dated tasks with no goal get their own chip, otherwise the only way to
+    // reach something created by an instruction is the catch-all "All" view.
+    final noList = _tasksByGoal[kNoListId];
+    if (noList != null && noList.isNotEmpty) {
+      var open = 0;
+      for (final t in noList) {
+        if ((t['status'] ?? '').toString() != 'done') open++;
+      }
+      chips.add(_listChip(kNoListId, 'No list', open));
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 18, 0, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(right: 24),
+            child: Text('LISTS',
+                style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textTertiary,
+                    letterSpacing: 1.2)),
+          ),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              for (var i = 0; i < chips.length; i++) ...[
+                chips[i],
+                if (i < chips.length - 1) const SizedBox(width: 8),
+              ],
+              const SizedBox(width: 24),
+            ]),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _listChip(String id, String title, int open) {
     final selected = _selectedListId == id;
     return GestureDetector(
