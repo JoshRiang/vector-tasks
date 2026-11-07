@@ -1,0 +1,11 @@
+{
+  "name": "vector-tasks-screenshots",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "shoot": "node scripts/shoot.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.40.0"
+  }
+}

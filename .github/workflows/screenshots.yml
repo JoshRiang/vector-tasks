@@ -1,0 +1,41 @@
+name: Screenshots
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  screenshots:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - run: flutter pub get
+      - run: flutter build web --release --dart-define=API_BASE=http://localhost:9473 --dart-define=API_FALLBACKS=
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        run: npm install --silent playwright && npx playwright install --with-deps chromium
+
+      - name: Run shoot script
+        run: node scripts/shoot.js
+
+      - name: Commit screenshots + README
+        run: |
+          git config user.name 'Joshua Riangkamang'
+          git config user.email 'sandinya1sampai8@gmail.com'
+          git add screenshots/ README.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "ci: update screenshots"
+          git push
