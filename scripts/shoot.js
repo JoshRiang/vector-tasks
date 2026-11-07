@@ -33,7 +33,15 @@ async function main() {
   const staticOk = await waitForServerAsync('http://localhost:9474', 15000);
   if (!staticOk) throw new Error('static server failed to start');
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ 
+    headless: true,
+    args: [
+      '--use-gl=angle',
+      '--use-angle=swiftshader',
+      '--enable-unsafe-swiftshader',
+      '--disable-dev-shm-usage',
+    ],
+  });
   const context = await browser.newContext({
     viewport: { width: 390, height: 844 },
     deviceScaleFactor: 2,
@@ -56,7 +64,7 @@ async function main() {
     const diag = 'screenshots/diagnostic.png';
     fs.mkdirSync('screenshots', { recursive: true });
     await page.screenshot({ path: diag });
-    throw new Error(`No canvas rendered within 30s. Diagnostic saved to ${diag}. Last console: ${page._lastConsole || '(none)'}`);
+    throw new Error(`No canvas rendered within 30s. Diagnostic saved to ${diag}.`);
   }
 
   // Wait for Flutter to finish laying out the first frame.

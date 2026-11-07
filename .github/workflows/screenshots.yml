@@ -16,7 +16,11 @@ jobs:
           channel: 'stable'
 
       - run: flutter pub get
-      - run: flutter build web --release --dart-define=API_BASE=http://localhost:9473 --dart-define=API_FALLBACKS=
+      # --web-renderer canvaskit is explicit: with `auto` (the default) Flutter
+      # picks the HTML renderer when the browser reports no WebGL, and the HTML
+      # renderer draws with DOM elements -- no <canvas> ever exists, so the
+      # screenshot script's canvas wait can never succeed.
+      - run: flutter build web --release --web-renderer canvaskit --dart-define=API_BASE=http://localhost:9473 --dart-define=API_FALLBACKS=
 
       - uses: actions/setup-node@v4
         with:
