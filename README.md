@@ -6,48 +6,34 @@ Part of the **VECTOR Suite** — three apps, one private database.
 
 ---
 
-## The problem this solves
+## The Problem
 
-> "I'm not productive, why? Because I have too many to-do lists, and I don't
-> know where to start, so it leads to nothing started."
+> "I am not productive. I have too many to‑do lists, and I don't know
+> which one to start, so I start nothing."
 
-The problem is **not** a missing to-do list. A list of twenty undifferentiated
-items is what *causes* the paralysis. So this app inverts the normal model:
+The issue is not a missing to‑do list. A list of 20 undifferentiated items *causes* the paralysis. This app flips the model: **You never write a task.**
 
-**You never write a task.** You type an outcome — *"get a quant internship in
-Germany"*, *"finish my thesis chapter 3"* — and the assistant returns a
-dependency-ordered plan whose **first step is always something you can start in
-under 30 minutes**.
+- **Input**: an outcome (e.g. *"get a quant internship in Germany"*, *"finish thesis chapter 3"*).
+- **Output**: a dependency‑ordered plan where the **first step is always startable in under 30 minutes**.
 
-## The one design decision that matters
+## How It Works
 
-The app shows **exactly one task at a time**.
+The app shows **multiple lists side by side**, but each list contains tasks grouped by date (Overdue, Today, Tomorrow, Later, No date). A **list selector chip row** at the top lets you switch between "All tasks" and individual goals. Each task row shows its priority badge (P1–P4), due date, duration, and whether it is startable right now (highlighted in accent). Tapping a row opens a detail page where you can edit title, date, time, all‑day, notes, priority, minutes, and the list it belongs to.
 
-Blocking is enforced in the database, not the UI:
+A **quick‑add card** at the bottom lets you create tasks with title, due date, priority, and notes. New lists can be created with the "Add list" button.
 
-```sql
-where t.status in ('todo','doing')
-  and (t.blocked_by is null or b.status = 'done')
-```
+The app runs in **viewer mode** by default (`VECTOR_READ_ONLY=true`): editing surfaces are hidden so only one writer (Hermes) changes the data. Flip it with `--dart-define=VECTOR_READ_ONLY=false` for an editable build.
 
-A task whose blocker is unfinished is *never* returned to the app. A UI that
-merely hides the rest still leaves the whole list in your head — so the filter
-lives in the data layer, where it cannot be bypassed.
+## Home‑Screen Widget
 
-Finish the current task → the next one unlocks. That's the whole loop.
-
-## Home-screen widget
-
-A native Android widget (`NextActionWidget`) shows the single next action
-without opening the app. It fetches the API directly on a background thread, so
-it stays current rather than showing a stale snapshot.
+`NextActionWidget` (Android) shows the single next action without opening the app. It reads the API directly on a background thread, keeping it current.
 
 ## Screens
 
-- **Goal input** — one text field. Nothing else.
-- **The plan** — one task, its rationale, and its time estimate. A progress bar
-  shows how far along you are without showing everything left to do.
-- **Completion** — when the plan is finished it says so, and offers a new goal.
+| Screen | Description |
+|--------|-------------|
+| **Home** | List selector chips, task rows grouped by date bucket, quick‑add card (editable mode only), new‑list card. |
+| **Task Detail** | Edit title, notes, date, time, all‑day, list, priority, minutes. Mark done / delete with confirmation. |
 
 ## Architecture
 
@@ -56,8 +42,7 @@ Flutter app  ──HTTP──▶  VECTOR Suite API  ──▶  private database
   (this repo)             (decompose + store)
 ```
 
-The app never calls a language model directly. The model key lives server-side
-only: anything embedded in an APK is extractable with `unzip` and `strings`.
+The LLM key lives server‑side only — shipping it in an APK would make it extractable with `unzip` + `strings`. No app ever calls a model directly.
 
 ## Build
 
@@ -67,37 +52,31 @@ flutter test
 flutter build apk --release --target-platform android-arm64 --split-per-abi
 ```
 
-Point it at your own server:
+Point at your own server:
 
 ```bash
 flutter build apk --dart-define=API_BASE=https://your-host
 ```
 
-CI builds the APK on every push and injects `API_BASE` from the repository
-variable of the same name, so the endpoint can change without touching code.
+CI builds the APK on every push, injects `API_BASE` from the repo's variable, so the endpoint can change without touching code.
 
-## Widget endpoint
+## Widget Endpoint
 
-The widget reads `vector_api_base` from
-`android/app/src/main/res/values/strings.xml`. The CI build rewrites that value
-from the same `API_BASE` variable, so the widget and the app can never point at
-different servers.
+The widget reads `vector_api_base` from `android/app/src/main/res/values/strings.xml`. CI rewrites that value from the same `API_BASE` variable, so the widget and the app cannot point at different servers.
 
 ## The VECTOR Suite
 
 | App | Question it answers |
-|---|---|
+|-----|---------------------|
 | **Vector Tasks** (this) | What is the one thing to start right now? |
 | [Vector Calendar](https://github.com/JoshRiang/vector-calendar) | How is today going? |
 | [Vector Finance](https://github.com/JoshRiang/vector-finance) | How much runway is left? |
 
-All three share one private database, so a task created here appears on the
-calendar and informs the day's cost.
+All three share one private database. A task created here appears on the calendar and informs the day's cost.
 
 ## Privacy
 
-Every table is row-level-security gated on the authenticated user. The backend
-runs on the owner's own server.
+Every table is row‑level‑security gated on the authenticated user. The backend runs on the owner's own server.
 
 ## Licence
 
