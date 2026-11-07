@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
+  <base href="/">
   <title>vector_tasks</title>
   <meta charset="UTF-8">
   <meta name="description" content="State an end goal, get an AI-generated, startable to-do list.">
@@ -16,14 +17,14 @@
 </head>
 <body>
   <div id="window"></div>
-  <script src="flutter.js"></script>
+  <script src="flutter.js" defer></script>
   <script>
     window.flutterConfig = {};
     navigator.serviceWorker.register('flutter_service_worker.js')
       .catch((event) => console.error(event));
     _flutter.loader.load({
       entrypointUrl: "main.dart.js",
-      onEntraceLoaded: function(engineInitializer) {
+      onEntrypointLoaded: function(engineInitializer) {
         engineInitializer.initializeEngine().then((appUpdater) => {
           appUpdater.runApp();
         });
