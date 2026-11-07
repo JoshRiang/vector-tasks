@@ -183,7 +183,7 @@ async function main() {
   //      "All tasks · 8" chip spans x=24..~118; first goal chip starts
   //      ~x=126 (8px gap). Click center of that chip: x~195, y~133.
   // ------------------------------------------------------------------
-  await page.click('canvas', { position: { x: 195, y: 133 }, delay: 20 });
+  await page.click('flutter-view', { position: { x: 195, y: 133 }, delay: 20 });
   await page.waitForTimeout(1500);
 
   // Verify the canvas actually changed (different MD5 = different screen)
@@ -210,10 +210,10 @@ async function main() {
   //    top ~y=222 (row content ~32px + 13px vertical padding).
   //    Click the row body (x=195 avoids the 24px checkbox on the left).
   // ------------------------------------------------------------------
-  await page.click('canvas', { position: { x: 70, y: 133 }, delay: 20 });
+  await page.click('flutter-view', { position: { x: 70, y: 133 }, delay: 20 });
   await page.waitForTimeout(1500);
 
-  await page.click('canvas', { position: { x: 195, y: 258 }, delay: 20 });
+  await page.click('flutter-view', { position: { x: 195, y: 258 }, delay: 20 });
   await page.waitForTimeout(3000); // detail page route transition + layout
 
   // Verify the detail page actually painted
