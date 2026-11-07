@@ -55,11 +55,29 @@ def compute_goal_stats(goal_id):
     return total, done, pct
 
 class Handler(BaseHTTPRequestHandler):
+    # CORS: the page is served from :9474 and talks to this stub on :9473,
+    # a cross-origin fetch. Without these headers the browser blocks every
+    # response and the app renders its "cannot reach server" state instead of
+    # the task list, so the screenshots would be meaningless.
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-User-Id, X-Api-Key")
+
+    def do_OPTIONS(self):
+        # Preflight: answer 204 with the CORS headers so the browser lets the
+        # real request through. No body.
+        self.send_response(204)
+        self._cors()
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._cors()
         self.end_headers()
         self.wfile.write(body)
 
@@ -142,7 +160,7 @@ class Handler(BaseHTTPRequestHandler):
         # Read body
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len) if content_len else b""
-        
+
         if path == "/diag":
             self._json({})
         elif path == "/tasks":

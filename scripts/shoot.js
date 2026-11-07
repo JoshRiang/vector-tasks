@@ -1,6 +1,7 @@
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const http = require('http');
+const fs = require('fs');
 
 async function waitForServerAsync(url, maxMs) {
   const start = Date.now();
@@ -23,13 +24,14 @@ async function main() {
   const stubOk = await waitForServerAsync('http://localhost:9473/today', 15000);
   if (!stubOk) throw new Error('stub API failed to start');
 
-  const staticServer = spawn('python3', ['-m', 'http.server', '9474', '--directory', 'build/web'], { detached: true, stdio: 'ignore' });
+  // Use scripts/serve.py: it serves .wasm as application/wasm, which is what
+  // CanvasKit's WebAssembly.instantiateStreaming needs. The plain
+  // `python3 -m http.server` returns text/plain for .wasm and the engine
+  // aborts before any canvas appears.
+  const staticServer = spawn('python3', ['scripts/serve.py', 'build/web', '9474'], { detached: true, stdio: 'ignore' });
   staticServer.unref();
   const staticOk = await waitForServerAsync('http://localhost:9474', 15000);
   if (!staticOk) throw new Error('static server failed to start');
-
-  // Give Flutter web time to load
-  await new Promise(r => setTimeout(r, 10000));
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
@@ -38,19 +40,34 @@ async function main() {
   });
   const page = await context.newPage();
 
-  await page.goto('http://localhost:9474', { waitUntil: 'networkidle' });
-  await page.waitForSelector('canvas', { timeout: 15000 });
-  // Wait for Flutter to render content on canvas
-  await page.waitForTimeout(8000);
+  // Surface every console message so a failed render is diagnosable from CI
+  // logs without guessing. The app itself beacons startup stages to /diag.
+  page.on('console', (msg) => console.log('[browser]', msg.type(), msg.text()));
+  page.on('pageerror', (err) => console.error('[pageerror]', err.message));
 
-  const fs = require('fs');
+  await page.goto('http://localhost:9474', { waitUntil: 'domcontentloaded' });
+
+  // The modern Flutter bootstrap writes the canvas into #window. Wait for it
+  // to be visible before screenshotting; if it never appears, fail loudly with
+  // a diagnostic screenshot instead of a silent timeout.
+  try {
+    await page.waitForSelector('canvas', { timeout: 30000 });
+  } catch (e) {
+    const diag = 'screenshots/diagnostic.png';
+    fs.mkdirSync('screenshots', { recursive: true });
+    await page.screenshot({ path: diag });
+    throw new Error(`No canvas rendered within 30s. Diagnostic saved to ${diag}. Last console: ${page._lastConsole || '(none)'}`);
+  }
+
+  // Wait for Flutter to finish laying out the first frame.
+  await page.waitForTimeout(5000);
+
   fs.mkdirSync('screenshots', { recursive: true });
 
   // home.png
   await page.screenshot({ path: 'screenshots/home.png' });
 
   // goals.png — click a goal chip (approximate coordinates)
-  // The list chips are at around y=160. Click on the second chip (a goal).
   try {
     await page.click('canvas', { position: { x: 150, y: 170 } });
     await page.waitForTimeout(1500);
@@ -69,7 +86,6 @@ async function main() {
     await page.waitForTimeout(2500);
     await page.screenshot({ path: 'screenshots/task_detail.png' });
     // Go back
-    // The back button is in the navigation bar top-left
     await page.click('canvas', { position: { x: 30, y: 60 } });
     await page.waitForTimeout(1500);
   } catch (e) {}

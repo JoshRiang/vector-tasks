@@ -5,31 +5,15 @@
   <title>vector_tasks</title>
   <meta charset="UTF-8">
   <meta name="description" content="State an end goal, get an AI-generated, startable to-do list.">
-  <meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1.0">
-  <link rel="manifest" href="icons/Icon-192.png">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#F5F5F7">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
   <style>
-    html, body, div#window {
+    html, body {
       width: 100%; height: 100%; margin: 0; padding: 0;
     }
   </style>
 </head>
 <body>
-  <div id="window"></div>
-  <script src="flutter.js" defer></script>
-  <script>
-    window.flutterConfig = {};
-    navigator.serviceWorker.register('flutter_service_worker.js')
-      .catch((event) => console.error(event));
-    _flutter.loader.load({
-      entrypointUrl: "main.dart.js",
-      onEntrypointLoaded: function(engineInitializer) {
-        engineInitializer.initializeEngine().then((appUpdater) => {
-          appUpdater.runApp();
-        });
-      }
-    });
-  </script>
+  <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
